@@ -4,9 +4,6 @@ import "time"
 
 // Config holds the configuration for opening a database connection.
 type Config struct {
-	// Engine specifies which database engine to use.
-	Engine Engine
-
 	// DSN is the data source name / connection string.
 	//
 	// Examples:
@@ -32,4 +29,9 @@ type Config struct {
 	// ConnMaxIdleTime sets the maximum amount of time a connection may be idle.
 	// Only applies to SQL databases.
 	ConnMaxIdleTime time.Duration
+
+	// Retry configuration for transient failures.
+	RetryMaxRetries int
+	RetryBaseDelay  time.Duration
+	RetryMaxDelay   time.Duration
 }

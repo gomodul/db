@@ -1,4 +1,4 @@
-package postgres
+package mysql
 
 import (
 	"context"
@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gomodul/db/dialect"
 	"github.com/gomodul/db/query"
 	"github.com/gomodul/db/translator"
 )
 
-// Driver implements the dialect.Driver interface for PostgreSQL
+// Driver implements the dialect.Driver interface for MySQL
 type Driver struct {
 	db     *sql.DB
 	dsn    string
@@ -20,14 +20,14 @@ type Driver struct {
 	trans  *translator.SQLTranslator
 }
 
-// NewDriver creates a new PostgreSQL driver
+// NewDriver creates a new MySQL driver
 func NewDriver() *Driver {
 	return &Driver{}
 }
 
 // Name returns the driver name
 func (d *Driver) Name() string {
-	return "postgres"
+	return "mysql"
 }
 
 // Type returns the driver type
@@ -41,9 +41,9 @@ func (d *Driver) Initialize(cfg *dialect.Config) error {
 	d.dsn = cfg.DSN
 
 	var err error
-	d.db, err = sql.Open("pgx", d.dsn)
+	d.db, err = sql.Open("mysql", d.dsn)
 	if err != nil {
-		return fmt.Errorf("failed to open postgres: %w", err)
+		return fmt.Errorf("failed to open mysql: %w", err)
 	}
 
 	// Set connection pool settings
@@ -61,7 +61,7 @@ func (d *Driver) Initialize(cfg *dialect.Config) error {
 	}
 
 	// Initialize translator
-	d.trans = translator.NewSQLTranslator(&PostgresDialect{})
+	d.trans = translator.NewSQLTranslator(&MySQLDialect{})
 
 	// Verify connection
 	return d.db.Ping()
@@ -262,15 +262,15 @@ func (d *Driver) scanRows(rows *sql.Rows) ([]interface{}, error) {
 func (d *Driver) Capabilities() *dialect.Capabilities {
 	return &dialect.Capabilities{
 		Query: dialect.QueryCapabilities{
-			Create:      true,
-			Read:        true,
-			Update:      true,
-			Delete:      true,
-			BatchCreate: true,
-			BatchUpdate: true,
-			BatchDelete: true,
-			Filters:     allFilterOperators(),
-			Sort:        true,
+			Create:         true,
+			Read:           true,
+			Update:         true,
+			Delete:         true,
+			BatchCreate:    true,
+			BatchUpdate:    true,
+			BatchDelete:    true,
+			Filters:        allFilterOperators(),
+			Sort:           true,
 			MultiFieldSort: true,
 			OffsetPagination: true,
 			GroupBy:         true,
@@ -280,13 +280,13 @@ func (d *Driver) Capabilities() *dialect.Capabilities {
 			Subqueries:      true,
 			Unions:          true,
 			Hints:           true,
-			Locking:         true,
+			Locking:         false,
 		},
 		Transaction: dialect.TransactionCapabilities{
 			Supported:       true,
-			Nested:          true,
+			Nested:          false,
 			Savepoints:      true,
-			IsolationLevels: allIsolationLevels(),
+			IsolationLevels: mysqlIsolationLevels(),
 		},
 		Schema: dialect.SchemaCapabilities{
 			AutoMigrate:      true,
@@ -302,11 +302,10 @@ func (d *Driver) Capabilities() *dialect.Capabilities {
 		Indexing: dialect.IndexCapabilities{
 			Unique:    true,
 			Composite: true,
-			Partial:   true,
+			Partial:   false,
 			FullText:  true,
 			BTree:     true,
 			Hash:      true,
-			GiST:      true,
 		},
 	}
 }
@@ -328,7 +327,10 @@ func (d *Driver) Health() (*dialect.HealthStatus, error) {
 
 	// Get connection pool stats
 	stats := d.db.Stats()
-	return dialect.NewHealthyStatus(time.Since(start)).WithDetail("open_connections", stats.OpenConnections).WithDetail("in_use", stats.InUse).WithDetail("idle", stats.Idle), nil
+	return dialect.NewHealthyStatus(time.Since(start)).
+		WithDetail("open_connections", stats.OpenConnections).
+		WithDetail("in_use", stats.InUse).
+		WithDetail("idle", stats.Idle), nil
 }
 
 // BeginTx starts a new transaction
@@ -337,69 +339,64 @@ func (d *Driver) BeginTx(ctx context.Context) (dialect.Transaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &PostgresTx{tx: tx, driver: d}, nil
+	return &MySQLTx{tx: tx, driver: d}, nil
 }
 
-// PostgresTx represents a PostgreSQL transaction
-type PostgresTx struct {
+// MySQLTx represents a MySQL transaction
+type MySQLTx struct {
 	tx     *sql.Tx
 	driver *Driver
 }
 
 // Commit commits the transaction
-func (t *PostgresTx) Commit() error {
+func (t *MySQLTx) Commit() error {
 	return t.tx.Commit()
 }
 
 // Rollback rolls back the transaction
-func (t *PostgresTx) Rollback() error {
+func (t *MySQLTx) Rollback() error {
 	return t.tx.Rollback()
 }
 
 // Query executes a query within the transaction
-func (t *PostgresTx) Query(ctx context.Context, q *query.Query) (*dialect.Result, error) {
+func (t *MySQLTx) Query(ctx context.Context, q *query.Query) (*dialect.Result, error) {
 	return t.driver.Execute(ctx, q)
 }
 
 // Exec executes a command without returning rows
-func (t *PostgresTx) Exec(ctx context.Context, rawSQL string, args ...interface{}) (*dialect.Result, error) {
+func (t *MySQLTx) Exec(ctx context.Context, rawSQL string, args ...interface{}) (*dialect.Result, error) {
 	q := &query.Query{
-		Raw:    rawSQL,
+		Raw:     rawSQL,
 		RawArgs: args,
-		IsRaw:  true,
+		IsRaw:   true,
 	}
 	return t.driver.Execute(ctx, q)
 }
 
-// PostgresDialect implements translator.SQLDialect for PostgreSQL
-type PostgresDialect struct{}
+// MySQLDialect implements translator.SQLDialect for MySQL
+type MySQLDialect struct{}
 
 // Name returns the dialect name
-func (d *PostgresDialect) Name() string {
-	return "postgres"
+func (d *MySQLDialect) Name() string {
+	return "mysql"
 }
 
 // BindVar returns the bind variable format
-func (d *PostgresDialect) BindVar(idx int) string {
-	return fmt.Sprintf("$%d", idx)
+func (d *MySQLDialect) BindVar(idx int) string {
+	return "?"
 }
 
 // QuoteIdentifier quotes an identifier
-func (d *PostgresDialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+func (d *MySQLDialect) QuoteIdentifier(name string) string {
+	return fmt.Sprintf("`%s`", name)
 }
 
 // Supports checks if a feature is supported
-func (d *PostgresDialect) Supports(feature translator.SQLFeature) bool {
+func (d *MySQLDialect) Supports(feature translator.SQLFeature) bool {
 	switch feature {
 	case translator.FeatureWindowFunctions,
 		translator.FeatureCTE,
-		translator.FeatureReturningClause,
-		translator.FeatureUpsert,
-		translator.FeatureIgnoreConflict,
-		translator.FeatureFilteredAggregates:
-		return true
-	case translator.FeatureFullOuterJoin:
+		translator.FeatureUpsert:
 		return true
 	default:
 		return false
@@ -440,7 +437,7 @@ func allAggregationOperators() []query.AggOperator {
 	}
 }
 
-func allIsolationLevels() []dialect.IsolationLevel {
+func mysqlIsolationLevels() []dialect.IsolationLevel {
 	return []dialect.IsolationLevel{
 		dialect.LevelReadUncommitted,
 		dialect.LevelReadCommitted,
@@ -450,11 +447,8 @@ func allIsolationLevels() []dialect.IsolationLevel {
 }
 
 func init() {
-	// Register the PostgreSQL driver
-	dialect.Register("postgres", func() dialect.Driver {
-		return NewDriver()
-	})
-	dialect.Register("postgresql", func() dialect.Driver {
+	// Register the MySQL driver
+	dialect.Register("mysql", func() dialect.Driver {
 		return NewDriver()
 	})
 }

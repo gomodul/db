@@ -1,18 +1,19 @@
-package postgres
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "modernc.org/sqlite"
 	"github.com/gomodul/db/dialect"
 	"github.com/gomodul/db/query"
 	"github.com/gomodul/db/translator"
 )
 
-// Driver implements the dialect.Driver interface for PostgreSQL
+// Driver implements the dialect.Driver interface for SQLite
 type Driver struct {
 	db     *sql.DB
 	dsn    string
@@ -20,14 +21,14 @@ type Driver struct {
 	trans  *translator.SQLTranslator
 }
 
-// NewDriver creates a new PostgreSQL driver
+// NewDriver creates a new SQLite driver
 func NewDriver() *Driver {
 	return &Driver{}
 }
 
 // Name returns the driver name
 func (d *Driver) Name() string {
-	return "postgres"
+	return "sqlite"
 }
 
 // Type returns the driver type
@@ -41,12 +42,12 @@ func (d *Driver) Initialize(cfg *dialect.Config) error {
 	d.dsn = cfg.DSN
 
 	var err error
-	d.db, err = sql.Open("pgx", d.dsn)
+	d.db, err = sql.Open("sqlite", d.dsn)
 	if err != nil {
-		return fmt.Errorf("failed to open postgres: %w", err)
+		return fmt.Errorf("failed to open sqlite: %w", err)
 	}
 
-	// Set connection pool settings
+	// Set connection pool settings (SQLite has limited support)
 	if cfg.MaxOpenConns > 0 {
 		d.db.SetMaxOpenConns(cfg.MaxOpenConns)
 	}
@@ -61,7 +62,7 @@ func (d *Driver) Initialize(cfg *dialect.Config) error {
 	}
 
 	// Initialize translator
-	d.trans = translator.NewSQLTranslator(&PostgresDialect{})
+	d.trans = translator.NewSQLTranslator(&SQLiteDialect{})
 
 	// Verify connection
 	return d.db.Ping()
@@ -262,15 +263,15 @@ func (d *Driver) scanRows(rows *sql.Rows) ([]interface{}, error) {
 func (d *Driver) Capabilities() *dialect.Capabilities {
 	return &dialect.Capabilities{
 		Query: dialect.QueryCapabilities{
-			Create:      true,
-			Read:        true,
-			Update:      true,
-			Delete:      true,
-			BatchCreate: true,
-			BatchUpdate: true,
-			BatchDelete: true,
-			Filters:     allFilterOperators(),
-			Sort:        true,
+			Create:         true,
+			Read:           true,
+			Update:         true,
+			Delete:         true,
+			BatchCreate:    true,
+			BatchUpdate:    false, // Limited support in SQLite
+			BatchDelete:    true,
+			Filters:        allFilterOperators(),
+			Sort:           true,
 			MultiFieldSort: true,
 			OffsetPagination: true,
 			GroupBy:         true,
@@ -279,14 +280,14 @@ func (d *Driver) Capabilities() *dialect.Capabilities {
 			NestedJoins:     true,
 			Subqueries:      true,
 			Unions:          true,
-			Hints:           true,
-			Locking:         true,
+			Hints:           false,
+			Locking:         false,
 		},
 		Transaction: dialect.TransactionCapabilities{
 			Supported:       true,
-			Nested:          true,
+			Nested:          false,
 			Savepoints:      true,
-			IsolationLevels: allIsolationLevels(),
+			IsolationLevels: sqliteIsolationLevels(),
 		},
 		Schema: dialect.SchemaCapabilities{
 			AutoMigrate:      true,
@@ -302,11 +303,10 @@ func (d *Driver) Capabilities() *dialect.Capabilities {
 		Indexing: dialect.IndexCapabilities{
 			Unique:    true,
 			Composite: true,
-			Partial:   true,
-			FullText:  true,
+			Partial:   false,
+			FullText:  true, // FTS5 extension
 			BTree:     true,
-			Hash:      true,
-			GiST:      true,
+			Hash:      false,
 		},
 	}
 }
@@ -328,7 +328,10 @@ func (d *Driver) Health() (*dialect.HealthStatus, error) {
 
 	// Get connection pool stats
 	stats := d.db.Stats()
-	return dialect.NewHealthyStatus(time.Since(start)).WithDetail("open_connections", stats.OpenConnections).WithDetail("in_use", stats.InUse).WithDetail("idle", stats.Idle), nil
+	return dialect.NewHealthyStatus(time.Since(start)).
+		WithDetail("open_connections", stats.OpenConnections).
+		WithDetail("in_use", stats.InUse).
+		WithDetail("idle", stats.Idle), nil
 }
 
 // BeginTx starts a new transaction
@@ -337,69 +340,63 @@ func (d *Driver) BeginTx(ctx context.Context) (dialect.Transaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &PostgresTx{tx: tx, driver: d}, nil
+	return &SQLiteTx{tx: tx, driver: d}, nil
 }
 
-// PostgresTx represents a PostgreSQL transaction
-type PostgresTx struct {
+// SQLiteTx represents a SQLite transaction
+type SQLiteTx struct {
 	tx     *sql.Tx
 	driver *Driver
 }
 
 // Commit commits the transaction
-func (t *PostgresTx) Commit() error {
+func (t *SQLiteTx) Commit() error {
 	return t.tx.Commit()
 }
 
 // Rollback rolls back the transaction
-func (t *PostgresTx) Rollback() error {
+func (t *SQLiteTx) Rollback() error {
 	return t.tx.Rollback()
 }
 
 // Query executes a query within the transaction
-func (t *PostgresTx) Query(ctx context.Context, q *query.Query) (*dialect.Result, error) {
+func (t *SQLiteTx) Query(ctx context.Context, q *query.Query) (*dialect.Result, error) {
 	return t.driver.Execute(ctx, q)
 }
 
 // Exec executes a command without returning rows
-func (t *PostgresTx) Exec(ctx context.Context, rawSQL string, args ...interface{}) (*dialect.Result, error) {
+func (t *SQLiteTx) Exec(ctx context.Context, rawSQL string, args ...interface{}) (*dialect.Result, error) {
 	q := &query.Query{
-		Raw:    rawSQL,
+		Raw:     rawSQL,
 		RawArgs: args,
-		IsRaw:  true,
+		IsRaw:   true,
 	}
 	return t.driver.Execute(ctx, q)
 }
 
-// PostgresDialect implements translator.SQLDialect for PostgreSQL
-type PostgresDialect struct{}
+// SQLiteDialect implements translator.SQLDialect for SQLite
+type SQLiteDialect struct{}
 
 // Name returns the dialect name
-func (d *PostgresDialect) Name() string {
-	return "postgres"
+func (d *SQLiteDialect) Name() string {
+	return "sqlite"
 }
 
 // BindVar returns the bind variable format
-func (d *PostgresDialect) BindVar(idx int) string {
-	return fmt.Sprintf("$%d", idx)
+func (d *SQLiteDialect) BindVar(idx int) string {
+	return "?"
 }
 
 // QuoteIdentifier quotes an identifier
-func (d *PostgresDialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+func (d *SQLiteDialect) QuoteIdentifier(name string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
 }
 
 // Supports checks if a feature is supported
-func (d *PostgresDialect) Supports(feature translator.SQLFeature) bool {
+func (d *SQLiteDialect) Supports(feature translator.SQLFeature) bool {
 	switch feature {
-	case translator.FeatureWindowFunctions,
-		translator.FeatureCTE,
-		translator.FeatureReturningClause,
-		translator.FeatureUpsert,
-		translator.FeatureIgnoreConflict,
-		translator.FeatureFilteredAggregates:
-		return true
-	case translator.FeatureFullOuterJoin:
+	case translator.FeatureCTE,
+		translator.FeatureUpsert:
 		return true
 	default:
 		return false
@@ -426,7 +423,6 @@ func allFilterOperators() []query.FilterOperator {
 		query.OpContains,
 		query.OpStartsWith,
 		query.OpEndsWith,
-		query.OpRegex,
 	}
 }
 
@@ -440,21 +436,19 @@ func allAggregationOperators() []query.AggOperator {
 	}
 }
 
-func allIsolationLevels() []dialect.IsolationLevel {
+func sqliteIsolationLevels() []dialect.IsolationLevel {
+	// SQLite only supports SERIALIZABLE isolation level
 	return []dialect.IsolationLevel{
-		dialect.LevelReadUncommitted,
-		dialect.LevelReadCommitted,
-		dialect.LevelRepeatableRead,
 		dialect.LevelSerializable,
 	}
 }
 
 func init() {
-	// Register the PostgreSQL driver
-	dialect.Register("postgres", func() dialect.Driver {
+	// Register the SQLite driver
+	dialect.Register("sqlite", func() dialect.Driver {
 		return NewDriver()
 	})
-	dialect.Register("postgresql", func() dialect.Driver {
+	dialect.Register("sqlite3", func() dialect.Driver {
 		return NewDriver()
 	})
 }
