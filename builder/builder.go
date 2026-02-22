@@ -1832,3 +1832,20 @@ func (b *QueryBuilder) Lead(alias, column string, offset int) *QueryBuilder {
 	}
 	return b.Window(alias, "LEAD", expr)
 }
+
+// ============ Result Methods ============
+
+// RowsAffected returns the number of rows affected by the last operation
+func (b *QueryBuilder) RowsAffected() int64 {
+	return b.db.RowsAffected
+}
+
+// Error returns any error from the last operation
+func (b *QueryBuilder) Error() error {
+	return b.db.Error
+}
+
+// Take finds the first record (alias for First for GORM compatibility)
+func (b *QueryBuilder) Take(dest interface{}) error {
+	return b.First(dest)
+}
