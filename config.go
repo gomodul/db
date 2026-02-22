@@ -1,6 +1,11 @@
 package db
 
-import "time"
+import (
+	"time"
+
+	"github.com/gomodul/db/cache"
+	"github.com/gomodul/db/logger"
+)
 
 // Config holds the configuration for opening a database connection.
 type Config struct {
@@ -34,4 +39,22 @@ type Config struct {
 	RetryMaxRetries int
 	RetryBaseDelay  time.Duration
 	RetryMaxDelay   time.Duration
+
+	// Logger is the logger for database operations
+	Logger logger.Logger
+
+	// LoggerConfig holds configuration for the default SQL logger
+	LoggerConfig *logger.Config
+
+	// DisableLogger disables all logging
+	DisableLogger bool
+
+	// Cache is the cache backend for query results
+	Cache cache.Cache
+
+	// CacheTTL is the default TTL for cached query results
+	CacheTTL time.Duration
+
+	// DisableCache disables all caching
+	DisableCache bool
 }

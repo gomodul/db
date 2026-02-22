@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
+	"github.com/gomodul/db/callback"
 	"github.com/gomodul/db/dialect"
+	"github.com/gomodul/db/internal/security"
+	"github.com/gomodul/db/logger"
 	"github.com/gomodul/db/query"
+	"github.com/gomodul/db/validation"
 )
 
 // QueryBuilder provides fluent API for building queries
@@ -16,6 +21,14 @@ type QueryBuilder struct {
 	db  *DB
 	q   *query.Query
 	d   dialect.Dialect
+
+	// Hooks
+	hookExecutor *HookExecutor
+	callbacks    *callback.CallbackRegistry
+
+	// Validation
+	validator validation.Validator
+	validate  bool // Enable/disable auto-validation
 }
 
 // DB is a wrapper around the main db.DB for builder
@@ -24,6 +37,11 @@ type DB struct {
 	Caps         *dialect.Capabilities
 	RowsAffected int64
 	Error        error
+}
+
+// HookExecutor wraps the main hook executor
+type HookExecutor struct {
+	executor interface{}
 }
 
 // New creates a new QueryBuilder
@@ -40,9 +58,12 @@ func New(db *DB, model interface{}) *QueryBuilder {
 	}
 
 	return &QueryBuilder{
-		db: db,
-		q:  q,
-		d:  db.Dialect,
+		db:        db,
+		q:         q,
+		d:         db.Dialect,
+		callbacks: callback.NewCallbackRegistry(),
+		validator: validation.NewValidator(),
+		validate:  true, // Auto-validate by default
 	}
 }
 
@@ -185,16 +206,37 @@ func (b *QueryBuilder) Preload(fields ...string) *QueryBuilder {
 
 // Find executes a find query and scans results into dest
 func (b *QueryBuilder) Find(dest interface{}) error {
+	// Execute BeforeFind hooks
+	ctx := callback.NewContext()
+	if err := b.executeHook("before_query", dest, ctx); err != nil {
+		return err
+	}
+
 	b.q.Operation = query.OpFind
 	result, err := b.execute()
 	if err != nil {
 		return err
 	}
-	return b.scanResult(dest, result.Data)
+
+	scanErr := b.scanResult(dest, result.Data)
+
+	// Execute AfterFind hooks
+	ctx = callback.NewContext()
+	if err := b.executeHook("after_query", dest, ctx); err != nil {
+		return err
+	}
+
+	return scanErr
 }
 
 // First finds the first matching record
 func (b *QueryBuilder) First(dest interface{}) error {
+	// Execute BeforeFind hooks
+	ctx := callback.NewContext()
+	if err := b.executeHook("before_query", dest, ctx); err != nil {
+		return err
+	}
+
 	limit := 1
 	b.q.Limit = &limit
 	b.q.Operation = query.OpFind
@@ -208,7 +250,15 @@ func (b *QueryBuilder) First(dest interface{}) error {
 		return ErrNotFound
 	}
 
-	return b.scanResult(dest, result.Data[0:1])
+	scanErr := b.scanResult(dest, result.Data[0:1])
+
+	// Execute AfterFind hooks
+	ctx = callback.NewContext()
+	if err := b.executeHook("after_query", dest, ctx); err != nil {
+		return err
+	}
+
+	return scanErr
 }
 
 // FirstOrCreate finds the first matching record or creates one
@@ -227,6 +277,20 @@ func (b *QueryBuilder) FindOrCreate(dest interface{}, conds ...interface{}) erro
 
 // Create inserts a new record
 func (b *QueryBuilder) Create(value interface{}) error {
+	// Validate if enabled
+	if err := b.validateIfNeeded(value); err != nil {
+		return err
+	}
+
+	// Execute BeforeCreate hooks
+	ctx := callback.NewContext()
+	if err := b.executeHook("before_create", value, ctx); err != nil {
+		return err
+	}
+	if ctx.IsSkipped() {
+		return nil
+	}
+
 	b.q.Operation = query.OpCreate
 	b.q.Document = value
 
@@ -237,8 +301,13 @@ func (b *QueryBuilder) Create(value interface{}) error {
 
 	// Store rows affected
 	if result != nil {
-		// You might want to add this to your DB struct
-		// b.db.RowsAffected = result.RowsAffected
+		b.db.RowsAffected = result.RowsAffected
+	}
+
+	// Execute AfterCreate hooks
+	ctx = callback.NewContext()
+	if err := b.executeHook("after_create", value, ctx); err != nil {
+		return err
 	}
 
 	return nil
@@ -267,20 +336,76 @@ func (b *QueryBuilder) Save(value interface{}) error {
 
 // Update modifies records
 func (b *QueryBuilder) Update(values interface{}) error {
+	// Validate if enabled
+	if err := b.validateIfNeeded(values); err != nil {
+		return err
+	}
+
+	// Execute BeforeUpdate hooks
+	ctx := callback.NewContext()
+	if err := b.executeHook("before_update", values, ctx); err != nil {
+		return err
+	}
+	if ctx.IsSkipped() {
+		return nil
+	}
+
 	b.q.Operation = query.OpUpdate
 	b.q.Document = values
 
-	_, err := b.execute()
-	return err
+	result, err := b.execute()
+	if err != nil {
+		return err
+	}
+
+	// Store rows affected
+	if result != nil {
+		b.db.RowsAffected = result.RowsAffected
+	}
+
+	// Execute AfterUpdate hooks
+	ctx = callback.NewContext()
+	if err := b.executeHook("after_update", values, ctx); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Updates modifies records with map
 func (b *QueryBuilder) Updates(values map[string]interface{}) error {
+	// Map validation is skipped for Updates (flexible updates)
+	// But you can call Validate manually before Updates if needed
+
+	// Execute BeforeUpdate hooks
+	ctx := callback.NewContext()
+	if err := b.executeHook("before_update", values, ctx); err != nil {
+		return err
+	}
+	if ctx.IsSkipped() {
+		return nil
+	}
+
 	b.q.Operation = query.OpUpdate
 	b.q.Updates = values
 
-	_, err := b.execute()
-	return err
+	result, err := b.execute()
+	if err != nil {
+		return err
+	}
+
+	// Store rows affected
+	if result != nil {
+		b.db.RowsAffected = result.RowsAffected
+	}
+
+	// Execute AfterUpdate hooks
+	ctx = callback.NewContext()
+	if err := b.executeHook("after_update", values, ctx); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // UpdateColumn updates a single column
@@ -290,10 +415,34 @@ func (b *QueryBuilder) UpdateColumn(column string, value interface{}) error {
 
 // Delete removes records
 func (b *QueryBuilder) Delete() error {
+	// Execute BeforeDelete hooks
+	ctx := callback.NewContext()
+	if err := b.executeHook("before_delete", b.q.Model, ctx); err != nil {
+		return err
+	}
+	if ctx.IsSkipped() {
+		return nil
+	}
+
 	b.q.Operation = query.OpDelete
 
-	_, err := b.execute()
-	return err
+	result, err := b.execute()
+	if err != nil {
+		return err
+	}
+
+	// Store rows affected
+	if result != nil {
+		b.db.RowsAffected = result.RowsAffected
+	}
+
+	// Execute AfterDelete hooks
+	ctx = callback.NewContext()
+	if err := b.executeHook("after_delete", b.q.Model, ctx); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // ============ Internal Methods ============
@@ -304,7 +453,136 @@ func (b *QueryBuilder) execute() (*dialect.Result, error) {
 		return nil, fmt.Errorf("no dialect configured")
 	}
 
-	return b.d.Execute(b.q.Context, b.q)
+	// Log query start
+	ctx := b.q.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Get the SQL query if available (for SQL databases)
+	sql := ""
+	if b.q.IsRaw && b.q.Raw != "" {
+		sql = b.q.Raw
+	}
+
+	// Log query start
+	logger.Begin(ctx, sql, b.q.RawArgs...)
+
+	// Execute query
+	start := time.Now()
+	result, err := b.d.Execute(ctx, b.q)
+	duration := time.Since(start)
+
+	// Log query end
+	logger.End(ctx, sql, duration, err)
+
+	return result, err
+}
+
+// executeHook executes a hook for the given operation
+func (b *QueryBuilder) executeHook(operation string, model interface{}, ctx *callback.Context) error {
+	if model == nil {
+		return nil
+	}
+
+	// Convert model to pointer if it's a struct
+	rv := reflect.ValueOf(model)
+	if rv.Kind() != reflect.Ptr {
+		// Create a pointer to the model
+		ptr := reflect.New(rv.Type())
+		ptr.Elem().Set(rv)
+		model = ptr.Interface()
+	}
+
+	// Execute interface-based hooks
+	switch operation {
+	case "before_create":
+		if bc, ok := model.(interface{ BeforeCreate(*callback.Context) error }); ok {
+			if err := bc.BeforeCreate(ctx); err != nil {
+				return err
+			}
+		}
+	case "after_create":
+		if ac, ok := model.(interface{ AfterCreate(*callback.Context) error }); ok {
+			if err := ac.AfterCreate(ctx); err != nil {
+				return err
+			}
+		}
+	case "before_update":
+		if bu, ok := model.(interface{ BeforeUpdate(*callback.Context) error }); ok {
+			if err := bu.BeforeUpdate(ctx); err != nil {
+				return err
+			}
+		}
+	case "after_update":
+		if au, ok := model.(interface{ AfterUpdate(*callback.Context) error }); ok {
+			if err := au.AfterUpdate(ctx); err != nil {
+				return err
+			}
+		}
+	case "before_delete":
+		if bd, ok := model.(interface{ BeforeDelete(*callback.Context) error }); ok {
+			if err := bd.BeforeDelete(ctx); err != nil {
+				return err
+			}
+		}
+	case "after_delete":
+		if ad, ok := model.(interface{ AfterDelete(*callback.Context) error }); ok {
+			if err := ad.AfterDelete(ctx); err != nil {
+				return err
+			}
+		}
+	case "before_query":
+		if bf, ok := model.(interface{ BeforeQuery(*callback.Context) error }); ok {
+			if err := bf.BeforeQuery(ctx); err != nil {
+				return err
+			}
+		}
+	case "after_query":
+		if af, ok := model.(interface{ AfterQuery(*callback.Context) error }); ok {
+			if err := af.AfterQuery(ctx); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Execute registered callbacks through callback registry
+	switch operation {
+	case "before_create":
+		if b.callbacks != nil {
+			return b.callbacks.Create().BeforeCreate(model, ctx)
+		}
+	case "after_create":
+		if b.callbacks != nil {
+			return b.callbacks.Create().AfterCreate(model, ctx)
+		}
+	case "before_update":
+		if b.callbacks != nil {
+			return b.callbacks.Update().BeforeUpdate(model, ctx)
+		}
+	case "after_update":
+		if b.callbacks != nil {
+			return b.callbacks.Update().AfterUpdate(model, ctx)
+		}
+	case "before_delete":
+		if b.callbacks != nil {
+			return b.callbacks.Delete().BeforeDelete(model, ctx)
+		}
+	case "after_delete":
+		if b.callbacks != nil {
+			return b.callbacks.Delete().AfterDelete(model, ctx)
+		}
+	case "before_query":
+		if b.callbacks != nil {
+			return b.callbacks.Query().BeforeQuery(model, ctx)
+		}
+	case "after_query":
+		if b.callbacks != nil {
+			return b.callbacks.Query().AfterQuery(model, ctx)
+		}
+	}
+
+	return nil
 }
 
 // scanResult scans the result data into the destination
@@ -554,10 +832,22 @@ func (b *QueryBuilder) parseFilter(filter interface{}, args ...interface{}) *que
 	}
 }
 
-// parseStringFilter parses string filter like "age > ?"
+// parseStringFilter parses string filter with GORM-style dynamic detection
+//
+// Supported formats:
+//   Where("id = ?", 1)                          // Simple equality
+//   Where("age > ?", 18)                        // Comparison
+//   Where("id IN ?", []int{1,2,3})              // Auto-detect IN from slice
+//   Where("name LIKE ?", "John%")               // LIKE
+//   Where("age BETWEEN ? AND ?", 18, 65)        // BETWEEN
+//   Where("created_at > ? AND status = ?", t, "active")  // Multiple conditions
 func (b *QueryBuilder) parseStringFilter(filterStr string, args ...interface{}) *query.Filter {
 	parts := strings.Fields(filterStr)
 	if len(parts) < 2 {
+		// Simple "field ?" format - auto-detect operator from args
+		if len(args) > 0 {
+			return b.autoDetectFilter(filterStr, args...)
+		}
 		return &query.Filter{
 			Field:    filterStr,
 			Operator: query.OpEqual,
@@ -567,8 +857,55 @@ func (b *QueryBuilder) parseStringFilter(filterStr string, args ...interface{}) 
 
 	field := parts[0]
 	operatorStr := strings.ToUpper(parts[1])
-	var value interface{}
 
+	// Handle BETWEEN with AND
+	if operatorStr == "BETWEEN" && len(args) >= 2 {
+		return &query.Filter{
+			Field:        field,
+			Operator:     query.OpBetween,
+			BetweenStart: args[0],
+			BetweenEnd:   args[1],
+			Logic:        query.LogicAnd,
+		}
+	}
+
+	// Handle IN clause with slice or multiple args
+	if operatorStr == "IN" {
+		if len(args) == 1 && isSlice(args[0]) {
+			return &query.Filter{
+				Field:    field,
+				Operator: query.OpIn,
+				Values:   toSlice(args[0]),
+				Logic:    query.LogicAnd,
+			}
+		}
+		return &query.Filter{
+			Field:    field,
+			Operator: query.OpIn,
+			Values:   args,
+			Logic:    query.LogicAnd,
+		}
+	}
+
+	// Handle NOT IN
+	if operatorStr == "NOT" && len(parts) > 2 && strings.ToUpper(parts[2]) == "IN" {
+		if len(args) == 1 && isSlice(args[0]) {
+			return &query.Filter{
+				Field:    field,
+				Operator: query.OpNotIn,
+				Values:   toSlice(args[0]),
+				Logic:    query.LogicAnd,
+			}
+		}
+		return &query.Filter{
+			Field:    field,
+			Operator: query.OpNotIn,
+			Values:   args,
+			Logic:    query.LogicAnd,
+		}
+	}
+
+	var value interface{}
 	if len(args) > 0 {
 		value = args[0]
 	}
@@ -581,6 +918,67 @@ func (b *QueryBuilder) parseStringFilter(filterStr string, args ...interface{}) 
 		Value:    value,
 		Logic:    query.LogicAnd,
 	}
+}
+
+// autoDetectFilter auto-detects operator from argument type (GORM-style)
+func (b *QueryBuilder) autoDetectFilter(field string, args ...interface{}) *query.Filter {
+	if len(args) == 0 {
+		return &query.Filter{
+			Field:    field,
+			Operator: query.OpEqual,
+			Value:    nil,
+		}
+	}
+
+	arg := args[0]
+
+	// Detect IN from slice
+	if isSlice(arg) {
+		return &query.Filter{
+			Field:    field,
+			Operator: query.OpIn,
+			Values:   toSlice(arg),
+			Logic:    query.LogicAnd,
+		}
+	}
+
+	// Detect nil/NULL
+	if arg == nil {
+		return &query.Filter{
+			Field:    field,
+			Operator: query.OpNull,
+			Logic:    query.LogicAnd,
+		}
+	}
+
+	return &query.Filter{
+		Field:    field,
+		Operator: query.OpEqual,
+		Value:    arg,
+		Logic:    query.LogicAnd,
+	}
+}
+
+// isSlice checks if value is a slice or array
+func isSlice(v interface{}) bool {
+	if v == nil {
+		return false
+	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array
+}
+
+// toSlice converts interface{} to []interface{}
+func toSlice(v interface{}) []interface{} {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+		result := make([]interface{}, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			result[i] = rv.Index(i).Interface()
+		}
+		return result
+	}
+	return []interface{}{v}
 }
 
 // parseMapFilter parses map[string]interface{} filter
@@ -789,64 +1187,95 @@ func (b *QueryBuilder) hasPrimaryKey(model interface{}) bool {
 	return false
 }
 
-// ============ Additional Filter Helper Functions ============
+// ============ Filter Helper Functions ============
+//
+// RECOMMENDED: Use Where() for all filtering - it supports GORM-style dynamic detection:
+//
+// Where("id = ?", 1)                           // Simple equality
+// Where("age > ?", 18)                         // Comparison
+// Where("id IN ?", []int{1,2,3})               // Auto-detect IN from slice
+// Where("name LIKE ?", "John%")                // LIKE
+// Where("age BETWEEN ? AND ?", 18, 65)         // BETWEEN
+// Where(map[string]interface{}{"status": "active"}) // Map filter
+// Where(User{Name: "John", Age: 30})           // Struct filter
+//
+// The methods below are provided as shortcuts for common cases.
 
-// WhereIn adds an IN filter
-func (b *QueryBuilder) WhereIn(field string, values ...interface{}) *QueryBuilder {
-	return b.Where(&query.Filter{
-		Field:    field,
-		Operator: query.OpIn,
-		Values:   values,
-	})
-}
-
-// WhereNotIn adds a NOT IN filter
-func (b *QueryBuilder) WhereNotIn(field string, values ...interface{}) *QueryBuilder {
-	return b.Where(&query.Filter{
-		Field:    field,
-		Operator: query.OpNotIn,
-		Values:   values,
-	})
-}
-
-// WhereBetween adds a BETWEEN filter
-func (b *QueryBuilder) WhereBetween(field string, start, end interface{}) *QueryBuilder {
-	return b.Where(&query.Filter{
-		Field:        field,
-		Operator:     query.OpBetween,
-		BetweenStart: start,
-		BetweenEnd:   end,
-	})
-}
-
-// WhereNull adds an IS NULL filter
-func (b *QueryBuilder) WhereNull(field string) *QueryBuilder {
-	return b.Where(&query.Filter{
-		Field:    field,
-		Operator: query.OpNull,
-	})
-}
-
-// WhereNotNull adds an IS NOT NULL filter
-func (b *QueryBuilder) WhereNotNull(field string) *QueryBuilder {
-	return b.Where(&query.Filter{
-		Field:    field,
-		Operator: query.OpNotNull,
-	})
-}
-
-// WhereLike adds a LIKE filter
-func (b *QueryBuilder) WhereLike(field, pattern string) *QueryBuilder {
-	return b.Where(&query.Filter{
-		Field:    field,
-		Operator: query.OpLike,
-		Value:    pattern,
-	})
-}
-
-// In adds a generic IN clause (alias for WhereIn)
+// In adds an IN filter - shorthand for Where("field IN ?", values)
+//
+// Prefer: Where("id IN ?", []int{1,2,3})
 func (b *QueryBuilder) In(field string, values ...interface{}) *QueryBuilder {
-	return b.WhereIn(field, values...)
+	return b.Where(field+" IN ?", values...)
+}
+
+// NotIn adds a NOT IN filter - shorthand for Where("field NOT IN ?", values)
+//
+// Prefer: Where("id NOT IN ?", []int{1,2,3})
+func (b *QueryBuilder) NotIn(field string, values ...interface{}) *QueryBuilder {
+	return b.Where(field+" NOT IN ?", values...)
+}
+
+// WhereIn adds an IN filter (legacy: use In or Where instead)
+func (b *QueryBuilder) WhereIn(field string, values ...interface{}) *QueryBuilder {
+	return b.In(field, values...)
+}
+
+// WhereNotIn adds a NOT IN filter (legacy: use NotIn or Where instead)
+func (b *QueryBuilder) WhereNotIn(field string, values ...interface{}) *QueryBuilder {
+	return b.NotIn(field, values...)
+}
+
+// Between adds a BETWEEN filter - shorthand for Where("field BETWEEN ? AND ?", start, end)
+//
+// Prefer: Where("age BETWEEN ? AND ?", 18, 65)
+func (b *QueryBuilder) Between(field string, start, end interface{}) *QueryBuilder {
+	return b.Where(field+" BETWEEN ? AND ?", start, end)
+}
+
+// WhereBetween adds a BETWEEN filter (legacy: use Between or Where instead)
+func (b *QueryBuilder) WhereBetween(field string, start, end interface{}) *QueryBuilder {
+	return b.Between(field, start, end)
+}
+
+// Null adds an IS NULL filter - shorthand for Where("field IS NULL")
+//
+// Prefer: Where("deleted_at IS NULL")
+func (b *QueryBuilder) Null(field string) *QueryBuilder {
+	return b.Where(field + " IS NULL")
+}
+
+// WhereNull adds an IS NULL filter (legacy: use Null or Where instead)
+func (b *QueryBuilder) WhereNull(field string) *QueryBuilder {
+	return b.Null(field)
+}
+
+// NotNull adds an IS NOT NULL filter - shorthand for Where("field IS NOT NULL")
+//
+// Prefer: Where("deleted_at IS NOT NULL")
+func (b *QueryBuilder) NotNull(field string) *QueryBuilder {
+	return b.Where(field + " IS NOT NULL")
+}
+
+// WhereNotNull adds an IS NOT NULL filter (legacy: use NotNull or Where instead)
+func (b *QueryBuilder) WhereNotNull(field string) *QueryBuilder {
+	return b.NotNull(field)
+}
+
+// Like adds a LIKE filter - shorthand for Where("field LIKE ?", pattern)
+//
+// Prefer: Where("name LIKE ?", "John%")
+func (b *QueryBuilder) Like(field, pattern string) *QueryBuilder {
+	return b.Where(field+" LIKE ?", pattern)
+}
+
+// WhereLike adds a LIKE filter (legacy: use Like or Where instead)
+func (b *QueryBuilder) WhereLike(field, pattern string) *QueryBuilder {
+	return b.Like(field, pattern)
+}
+
+// NotLike adds a NOT LIKE filter - shorthand for Where("field NOT LIKE ?", pattern)
+func (b *QueryBuilder) NotLike(field, pattern string) *QueryBuilder {
+	return b.Where(field+" NOT LIKE ?", pattern)
 }
 
 // OrIn adds an OR IN condition
@@ -886,7 +1315,23 @@ func (b *QueryBuilder) PerPage(perPage int) *QueryBuilder {
 // ============ Raw Query Methods ============
 
 // Raw executes a raw query
+//
+// SECURITY WARNING: Always use parameterized queries with placeholders.
+//   ✅ GOOD: db.Raw("SELECT * FROM users WHERE id = ?", userID)
+//   ❌ BAD:  db.Raw("SELECT * FROM users WHERE id = " + userID)
 func (b *QueryBuilder) Raw(sql string, args ...interface{}) *QueryBuilder {
+	// Validate raw query for security
+	if warnings, err := security.ValidateRawQuery(sql, nil); err != nil {
+		b.db.Error = fmt.Errorf("raw query validation failed: %w", err)
+		return b
+	} else if len(warnings) > 0 && b.db != nil {
+		// Store warnings for later logging
+		b.q.Warnings = make([]interface{}, len(warnings))
+		for i, w := range warnings {
+			b.q.Warnings[i] = w
+		}
+	}
+
 	b.q.IsRaw = true
 	b.q.Raw = sql
 	b.q.RawArgs = args
@@ -894,7 +1339,16 @@ func (b *QueryBuilder) Raw(sql string, args ...interface{}) *QueryBuilder {
 }
 
 // Exec executes a query without returning rows
+//
+// SECURITY WARNING: Always use parameterized queries with placeholders.
+//   ✅ GOOD: db.Exec("UPDATE users SET name = ? WHERE id = ?", "John", 1)
+//   ❌ BAD:  db.Exec("UPDATE users SET name = '" + name + "' WHERE id = " + id)
 func (b *QueryBuilder) Exec(sql string, args ...interface{}) (int64, error) {
+	// Validate raw query for security
+	if _, err := security.ValidateRawQuery(sql, nil); err != nil {
+		return 0, fmt.Errorf("raw query validation failed: %w", err)
+	}
+
 	b.q.IsRaw = true
 	b.q.Raw = sql
 	b.q.RawArgs = args
@@ -977,4 +1431,404 @@ func (tx *Tx) Rollback() error {
 // Tx returns a QueryBuilder for this transaction
 func (tx *Tx) Tx() *QueryBuilder {
 	return tx.b.Clone().WithTransaction("tx")
+}
+
+// ============ Validation Methods ============
+
+// Validate validates the model
+func (b *QueryBuilder) Validate(model interface{}) error {
+	if b.validator == nil {
+		return nil
+	}
+	return b.validator.Validate(model)
+}
+
+// ValidateField validates a single field
+func (b *QueryBuilder) ValidateField(field interface{}, tag string) error {
+	if b.validator == nil {
+		return nil
+	}
+	return b.validator.ValidateField(field, tag)
+}
+
+// SkipValidation disables auto-validation for the next operation
+func (b *QueryBuilder) SkipValidation() *QueryBuilder {
+	b.validate = false
+	return b
+}
+
+// EnableValidation enables auto-validation
+func (b *QueryBuilder) EnableValidation() *QueryBuilder {
+	b.validate = true
+	return b
+}
+
+// SetValidator sets a custom validator
+func (b *QueryBuilder) SetValidator(validator validation.Validator) *QueryBuilder {
+	b.validator = validator
+	return b
+}
+
+// validateIfNeeded validates the model if validation is enabled
+func (b *QueryBuilder) validateIfNeeded(model interface{}) error {
+	if b.validate && b.validator != nil {
+		return b.validator.Validate(model)
+	}
+	return nil
+}
+
+// ============ Exported Methods for External Access ============
+
+// GetQuery returns a copy of the internal query state
+// This allows external packages to inspect the query configuration
+func (b *QueryBuilder) GetQuery() *query.Query {
+	if b.q == nil {
+		return nil
+	}
+	return b.q.Clone()
+}
+
+// GetDialect returns the dialect being used
+func (b *QueryBuilder) GetDialect() dialect.Dialect {
+	return b.d
+}
+
+// GetCapabilities returns the driver capabilities
+func (b *QueryBuilder) GetCapabilities() *dialect.Capabilities {
+	return b.db.Caps
+}
+
+// GetOperation returns the current operation type
+func (b *QueryBuilder) GetOperation() string {
+	if b.q == nil {
+		return ""
+	}
+	return string(b.q.Operation)
+}
+
+// GetCollection returns the table/collection name
+func (b *QueryBuilder) GetCollection() string {
+	if b.q == nil {
+		return ""
+	}
+	return b.q.Collection
+}
+
+// GetLimit returns the limit value
+func (b *QueryBuilder) GetLimit() int {
+	if b.q == nil || b.q.Limit == nil {
+		return 0
+	}
+	return *b.q.Limit
+}
+
+// GetOffset returns the offset value
+func (b *QueryBuilder) GetOffset() int {
+	if b.q == nil || b.q.Offset == nil {
+		return 0
+	}
+	return *b.q.Offset
+}
+
+// ExecuteQuery executes the current query and returns the result
+// This is exported for use by streaming and other external packages
+func (b *QueryBuilder) ExecuteQuery(ctx context.Context) (*dialect.Result, error) {
+	if ctx != nil && b.q != nil {
+		b.q.Context = ctx
+	}
+	return b.execute()
+}
+
+// ExecuteResult executes the query and returns the dialect.Result
+// This is a convenience method for external packages
+func (b *QueryBuilder) ExecuteResult() (*dialect.Result, error) {
+	return b.execute()
+}
+
+// ============ Advanced Query Features (CTE, Subquery, Window Functions) ============
+
+// WithCTE adds a Common Table Expression (WITH clause)
+//
+// Example:
+//
+//	db.Model(&User{}).WithCTE("active_users", `
+//		SELECT id, name FROM users WHERE status = 'active'
+//	`)
+//
+//	// Or with a subquery builder:
+//	subQuery := db.Model(&User{}).Where("status = ?", "active")
+//	db.Model(&Order{}).WithCTE("active_users", subQuery)
+func (b *QueryBuilder) WithCTE(name string, queryParam interface{}, columns ...string) *QueryBuilder {
+	cte := &query.CTE{
+		Name:    name,
+		Columns: columns,
+	}
+
+	// Handle different query types
+	switch q := queryParam.(type) {
+	case *query.Query:
+		cte.Query = q
+	case *QueryBuilder:
+		cte.Query = q.q
+	case string:
+		// Raw SQL for CTE
+		cte.Query = &query.Query{
+			Raw:    q,
+			IsRaw: true,
+		}
+	default:
+		b.db.Error = fmt.Errorf("invalid CTE query type: %T", queryParam)
+		return b
+	}
+
+	if b.q.CTEs == nil {
+		b.q.CTEs = make([]*query.CTE, 0)
+	}
+	b.q.CTEs = append(b.q.CTEs, cte)
+	return b
+}
+
+// WithRecursiveCTE adds a recursive Common Table Expression
+//
+// Example:
+//
+//	db.Model(&Category{}).WithRecursiveCTE("category_tree", `
+//		SELECT id, name, parent_id FROM categories WHERE parent_id IS NULL
+//		UNION ALL
+//		SELECT c.id, c.name, c.parent_id FROM categories c
+//		INNER JOIN category_tree ct ON c.parent_id = ct.id
+//	`)
+func (b *QueryBuilder) WithRecursiveCTE(name string, rawSQL string, columns ...string) *QueryBuilder {
+	cte := &query.CTE{
+		Name:      name,
+		Recursive: true,
+		Columns:   columns,
+		Query: &query.Query{
+			Raw:    rawSQL,
+			IsRaw: true,
+		},
+	}
+
+	if b.q.CTEs == nil {
+		b.q.CTEs = make([]*query.CTE, 0)
+	}
+	b.q.CTEs = append(b.q.CTEs, cte)
+	return b
+}
+
+// WhereSubquery adds a subquery in the WHERE clause
+//
+// Example:
+//
+//	// WHERE id IN (SELECT user_id FROM orders WHERE total > 100)
+//	subQuery := db.Model(&Order{}).Select("user_id").Where("total > ?", 100)
+//	db.Model(&User{}).WhereSubquery("id", "IN", subQuery)
+//
+//	// WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
+//	subQuery := db.Model(&Order{}).Where("orders.user_id = users.id")
+//	db.Model(&User{}).WhereSubquery("", "EXISTS", subQuery)
+func (b *QueryBuilder) WhereSubquery(field, operator string, subQuery *QueryBuilder) *QueryBuilder {
+	if b.q.Subqueries == nil {
+		b.q.Subqueries = make([]*query.Subquery, 0)
+	}
+
+	sq := &query.Subquery{
+		Query:    subQuery.q,
+		Type:     query.SubqueryWhere,
+		Operator: operator,
+		Field:    field,
+	}
+
+	b.q.Subqueries = append(b.q.Subqueries, sq)
+	return b
+}
+
+// FromSubquery uses a subquery as the FROM source
+//
+// Example:
+//
+//	// SELECT * FROM (SELECT * FROM users WHERE age > 18) AS adults
+//	subQuery := db.Model(&User{}).Where("age > ?", 18)
+//	db.Model("").FromSubquery("adults", subQuery)
+func (b *QueryBuilder) FromSubquery(alias string, subQuery *QueryBuilder) *QueryBuilder {
+	if b.q.Subqueries == nil {
+		b.q.Subqueries = make([]*query.Subquery, 0)
+	}
+
+	sq := &query.Subquery{
+		Query: subQuery.q,
+		Type:  query.SubqueryFrom,
+		Alias: alias,
+	}
+
+	b.q.Subqueries = append(b.q.Subqueries, sq)
+	b.q.Collection = alias // Update collection to use subquery alias
+	return b
+}
+
+// Window adds a window function to the query
+//
+// Example:
+//
+//	// ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC)
+//	db.Model(&Employee{}).
+//		Window("row_num", "ROW_NUMBER", "").
+//		PartitionBy("department").
+//		WindowOrderBy("salary", false).
+//		WindowFrame("ROWS", "UNBOUNDED PRECEDING", "CURRENT ROW", "")
+func (b *QueryBuilder) Window(alias, funcName, expression string) *QueryBuilder {
+	wf := &query.WindowFunc{
+		Func:       funcName,
+		Alias:      alias,
+		Expression: expression,
+	}
+
+	if b.q.WindowFuncs == nil {
+		b.q.WindowFuncs = make([]*query.WindowFunc, 0)
+	}
+	b.q.WindowFuncs = append(b.q.WindowFuncs, wf)
+	return b
+}
+
+// PartitionBy adds a PARTITION BY clause to the last window function
+//
+// Example:
+//
+//	db.Model(&Employee{}).
+//		Window("row_num", "ROW_NUMBER", "").
+//		PartitionBy("department", "team")
+func (b *QueryBuilder) PartitionBy(columns ...string) *QueryBuilder {
+	if len(b.q.WindowFuncs) == 0 {
+		b.db.Error = fmt.Errorf("no window function defined for PartitionBy")
+		return b
+	}
+
+	lastWF := b.q.WindowFuncs[len(b.q.WindowFuncs)-1]
+	lastWF.Partition = append(lastWF.Partition, columns...)
+	return b
+}
+
+// WindowOrderBy adds an ORDER BY clause to the last window function
+//
+// Example:
+//
+//	db.Model(&Employee{}).
+//		Window("row_num", "ROW_NUMBER", "").
+//		WindowOrderBy("salary", false) // ORDER BY salary DESC
+func (b *QueryBuilder) WindowOrderBy(field string, ascending bool) *QueryBuilder {
+	if len(b.q.WindowFuncs) == 0 {
+		b.db.Error = fmt.Errorf("no window function defined for WindowOrderBy")
+		return b
+	}
+
+	lastWF := b.q.WindowFuncs[len(b.q.WindowFuncs)-1]
+	if lastWF.OrderBy == nil {
+		lastWF.OrderBy = make([]*query.Order, 0)
+	}
+
+	order := &query.Order{
+		Field:     field,
+		Direction: query.DirAsc,
+	}
+	if !ascending {
+		order.Direction = query.DirDesc
+	}
+
+	lastWF.OrderBy = append(lastWF.OrderBy, order)
+	return b
+}
+
+// WindowFrame adds a frame clause to the last window function
+//
+// Example:
+//
+//	db.Model(&Employee{}).
+//		Window("row_num", "ROW_NUMBER", "").
+//		WindowFrame("ROWS", "UNBOUNDED PRECEDING", "CURRENT ROW", "")
+//
+//	// ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+//	db.Model(&Employee{}).
+//		Window("avg_salary", "AVG", "salary").
+//		WindowFrame("ROWS", "1 PRECEDING", "1 FOLLOWING", "")
+func (b *QueryBuilder) WindowFrame(mode, start, end, exclude string) *QueryBuilder {
+	if len(b.q.WindowFuncs) == 0 {
+		b.db.Error = fmt.Errorf("no window function defined for WindowFrame")
+		return b
+	}
+
+	lastWF := b.q.WindowFuncs[len(b.q.WindowFuncs)-1]
+	lastWF.Frame = &query.Frame{
+		Mode:    mode,
+		Start:   start,
+		End:     end,
+		Exclude: exclude,
+	}
+	return b
+}
+
+// Rank adds a RANK() window function
+//
+// Example:
+//
+//	db.Model(&Employee{}).
+//		Rank("salary_rank", "").
+//		PartitionBy("department").
+//		WindowOrderBy("salary", false)
+func (b *QueryBuilder) Rank(alias string) *QueryBuilder {
+	return b.Window(alias, "RANK", "")
+}
+
+// DenseRank adds a DENSE_RANK() window function
+//
+// Example:
+//
+//	db.Model(&Employee{}).
+//		DenseRank("salary_rank").
+//		WindowOrderBy("salary", false)
+func (b *QueryBuilder) DenseRank(alias string) *QueryBuilder {
+	return b.Window(alias, "DENSE_RANK", "")
+}
+
+// RowNumber adds a ROW_NUMBER() window function
+//
+// Example:
+//
+//	db.Model(&Employee{}).
+//		RowNumber("row_num").
+//		PartitionBy("department").
+//		WindowOrderBy("hire_date", false)
+func (b *QueryBuilder) RowNumber(alias string) *QueryBuilder {
+	return b.Window(alias, "ROW_NUMBER", "")
+}
+
+// Lag adds a LAG() window function for accessing previous row values
+//
+// Example:
+//
+//	db.Model(&Sales{}).
+//		Lag("prev_sales", "amount", 1).
+//		PartitionBy("product_id").
+//		WindowOrderBy("sale_date", false)
+func (b *QueryBuilder) Lag(alias, column string, offset int) *QueryBuilder {
+	expr := column
+	if offset > 0 {
+		expr = fmt.Sprintf("%s, %d", column, offset)
+	}
+	return b.Window(alias, "LAG", expr)
+}
+
+// Lead adds a LEAD() window function for accessing next row values
+//
+// Example:
+//
+//	db.Model(&Sales{}).
+//		Lead("next_sales", "amount", 1).
+//		PartitionBy("product_id").
+//		WindowOrderBy("sale_date", false)
+func (b *QueryBuilder) Lead(alias, column string, offset int) *QueryBuilder {
+	expr := column
+	if offset > 0 {
+		expr = fmt.Sprintf("%s, %d", column, offset)
+	}
+	return b.Window(alias, "LEAD", expr)
 }

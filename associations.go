@@ -27,7 +27,37 @@ type AssociationConfig struct {
 // Association represents a relationship between models.
 type Association struct {
 	name   string
-	config AssociationConfig
+	Config AssociationConfig
+}
+
+// Name returns the association name
+func (a *Association) Name() string {
+	return a.name
+}
+
+// Type returns the association type as a string
+func (a *Association) Type() AssociationType {
+	return a.Config.Type
+}
+
+// Config returns the association configuration
+func (a *Association) GetConfig() *AssociationConfig {
+	return &a.Config
+}
+
+// GetForeignKey returns the foreign key
+func (a *Association) GetForeignKey() string {
+	return a.Config.ForeignKey
+}
+
+// GetReferences returns the references field
+func (a *Association) GetReferences() string {
+	return a.Config.References
+}
+
+// GetModel returns the associated model
+func (a *Association) GetModel() any {
+	return a.Config.Model
 }
 
 // HasOne defines a has-one relationship.
@@ -40,7 +70,7 @@ type Association struct {
 // The Profile field will be automatically loaded when using Preload.
 func HasOne(model any, foreignKey, references string) *Association {
 	return &Association{
-		config: AssociationConfig{
+		Config: AssociationConfig{
 			Type:       AssociationHasOne,
 			ForeignKey: foreignKey,
 			References: references,
@@ -57,7 +87,7 @@ func HasOne(model any, foreignKey, references string) *Association {
 //	}
 func HasMany(model any, foreignKey, references string) *Association {
 	return &Association{
-		config: AssociationConfig{
+		Config: AssociationConfig{
 			Type:       AssociationHasMany,
 			ForeignKey: foreignKey,
 			References: references,
@@ -75,7 +105,7 @@ func HasMany(model any, foreignKey, references string) *Association {
 //	}
 func BelongsTo(model any, foreignKey, references string) *Association {
 	return &Association{
-		config: AssociationConfig{
+		Config: AssociationConfig{
 			Type:       AssociationBelongsTo,
 			ForeignKey: foreignKey,
 			References: references,
@@ -109,7 +139,7 @@ func GetAssociations(model any) map[string]*Association {
 			name := strings.ToLower(f.Name)
 			associations[name] = &Association{
 				name: name,
-				config: AssociationConfig{
+				Config: AssociationConfig{
 					Type: AssociationHasOne,
 				},
 			}
@@ -117,7 +147,7 @@ func GetAssociations(model any) map[string]*Association {
 			name := strings.ToLower(f.Name)
 			associations[name] = &Association{
 				name: name,
-				config: AssociationConfig{
+				Config: AssociationConfig{
 					Type: AssociationHasMany,
 				},
 			}
@@ -125,7 +155,7 @@ func GetAssociations(model any) map[string]*Association {
 			name := strings.ToLower(f.Name)
 			associations[name] = &Association{
 				name: name,
-				config: AssociationConfig{
+				Config: AssociationConfig{
 					Type: AssociationBelongsTo,
 				},
 			}
@@ -172,9 +202,9 @@ func ExtractForeignKey(model any, foreignKey string) (any, error) {
 // GetAssociationTableName returns the table name for an association model.
 func GetAssociationTableName(association *Association) string {
 	// If the association has a model, extract table name from it
-	if association.config.Model != nil {
+	if association.Config.Model != nil {
 		// Use reflection to get the table name
-		rv := reflect.ValueOf(association.config.Model)
+		rv := reflect.ValueOf(association.Config.Model)
 		if rv.Kind() == reflect.Ptr {
 			rv = rv.Elem()
 		}
