@@ -45,7 +45,7 @@ func TestDB_Open(t *testing.T) {
 // TestDB_Config tests database configuration
 func TestDB_Config(t *testing.T) {
 	cfg := Config{
-		DSN:            "test://localhost",
+		DSN:             "test://localhost",
 		MaxOpenConns:    10,
 		MaxIdleConns:    5,
 		ConnMaxLifetime: time.Hour,
@@ -151,7 +151,7 @@ func TestDB_Transaction(t *testing.T) {
 		Config: &Config{},
 	}
 
-	err := db.Transaction(func(tx *DB) error {
+	err := db.Transaction(t.Context(), func(tx *DB) error {
 		return nil
 	})
 	if err == nil {
@@ -351,7 +351,7 @@ func TestBuilder_Select(t *testing.T) {
 // TestBuilder_Join tests the Join methods
 func TestBuilder_Join(t *testing.T) {
 	type User struct {
-		ID       int64
+		ID        int64
 		ProfileID int64
 	}
 	type Profile struct {

@@ -67,8 +67,7 @@ func NewStatementCache(db *sql.DB, cfg *Config, backend cache.Cache) *StatementC
 // Prepare gets or creates a prepared statement
 func (sc *StatementCache) Prepare(ctx context.Context, query string) (*sql.Stmt, error) {
 	if sc == nil {
-		// Fallback to direct prepare
-		return sc.db.PrepareContext(ctx, query)
+		return nil, fmt.Errorf("statement cache is not initialized")
 	}
 
 	// Try to get from cache

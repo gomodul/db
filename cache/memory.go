@@ -31,8 +31,8 @@ func NewMemoryCache() *MemoryCache {
 
 // Get retrieves a value from the cache
 func (m *MemoryCache) Get(ctx context.Context, key string, dest interface{}) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	if m.closed {
 		return ErrCacheClosed
@@ -44,7 +44,6 @@ func (m *MemoryCache) Get(ctx context.Context, key string, dest interface{}) err
 		return ErrCacheMiss
 	}
 
-	// Check expiration
 	if item.expiration != nil && time.Now().After(*item.expiration) {
 		m.stats.Misses++
 		delete(m.items, key)
@@ -52,8 +51,6 @@ func (m *MemoryCache) Get(ctx context.Context, key string, dest interface{}) err
 	}
 
 	m.stats.Hits++
-
-	// Deserialize the value
 	return json.Unmarshal(item.value, dest)
 }
 

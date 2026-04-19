@@ -222,8 +222,7 @@ func (t *RPCTranslator) getCollectionName(q *query.Query) string {
 	if q.Collection != "" {
 		return q.Collection
 	}
-	// TODO: Extract from model using reflection
-	return "Resource"
+	return modelCollectionName(q.Model)
 }
 
 func (t *RPCTranslator) buildRPCFilter(filters []*query.Filter) []map[string]interface{} {

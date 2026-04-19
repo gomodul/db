@@ -15,58 +15,46 @@ type Migrator struct {
 	driver *Driver
 }
 
-// AutoMigrate is a no-op for MongoDB (schemaless)
 func (m *Migrator) AutoMigrate(models ...interface{}) error {
-	// MongoDB is schemaless, no migration needed
 	return nil
 }
 
-// CreateCollection creates a new collection
-func (m *Migrator) CreateCollection(name string, models ...interface{}) error {
+func (m *Migrator) CreateTable(name string, models ...interface{}) error {
 	ctx := context.Background()
 	err := m.driver.database.CreateCollection(ctx, name)
 	if err != nil {
-		return fmt.Errorf("failed to create collection: %w", err)
+		return fmt.Errorf("mongodb: create collection %s: %w", name, err)
 	}
 	return nil
 }
 
-// DropCollection drops a collection
-func (m *Migrator) DropCollection(name string) error {
+func (m *Migrator) DropTable(name string) error {
 	ctx := context.Background()
 	err := m.driver.database.Collection(name).Drop(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to drop collection: %w", err)
+		return fmt.Errorf("mongodb: drop collection %s: %w", name, err)
 	}
 	return nil
 }
 
-// HasCollection checks if a collection exists
-func (m *Migrator) HasCollection(name string) bool {
+func (m *Migrator) HasTable(name string) bool {
 	ctx := context.Background()
-	collections, err := m.driver.database.ListCollectionNames(ctx, bson.M{"name": name})
+	cols, err := m.driver.database.ListCollectionNames(ctx, bson.M{"name": name})
 	if err != nil {
 		return false
 	}
-	return len(collections) > 0
+	return len(cols) > 0
 }
 
-// RenameCollection renames a collection
-func (m *Migrator) RenameCollection(oldName, newName string) error {
-	// MongoDB doesn't have a direct rename command, need to copy and delete
+func (m *Migrator) RenameTable(oldName, newName string) error {
+	if !m.HasTable(oldName) {
+		return fmt.Errorf("mongodb: collection %s does not exist", oldName)
+	}
+	if m.HasTable(newName) {
+		return fmt.Errorf("mongodb: collection %s already exists", newName)
+	}
+
 	ctx := context.Background()
-
-	// Check if old collection exists
-	if !m.HasCollection(oldName) {
-		return fmt.Errorf("collection %s does not exist", oldName)
-	}
-
-	// Check if new collection already exists
-	if m.HasCollection(newName) {
-		return fmt.Errorf("collection %s already exists", newName)
-	}
-
-	// Copy documents from old to new collection
 	oldColl := m.driver.database.Collection(oldName)
 	newColl := m.driver.database.Collection(newName)
 
@@ -80,123 +68,114 @@ func (m *Migrator) RenameCollection(oldName, newName string) error {
 	if err := cursor.All(ctx, &docs); err != nil {
 		return err
 	}
-
 	if len(docs) > 0 {
-		_, err = newColl.InsertMany(ctx, docs)
-		if err != nil {
+		if _, err = newColl.InsertMany(ctx, docs); err != nil {
 			return err
 		}
 	}
-
-	// Drop old collection
-	return m.DropCollection(oldName)
+	return m.DropTable(oldName)
 }
 
-// CreateIndex creates an index
-func (m *Migrator) CreateIndex(collection, name string, fields []string, unique bool) error {
+func (m *Migrator) GetTables() ([]string, error) {
 	ctx := context.Background()
+	return m.driver.database.ListCollectionNames(ctx, bson.M{})
+}
 
+// MongoDB is schemaless — column operations are no-ops or best-effort.
+
+func (m *Migrator) AddColumn(table, column, columnType string) error {
+	return nil
+}
+
+func (m *Migrator) DropColumn(table, column string) error {
+	ctx := context.Background()
+	_, err := m.driver.database.Collection(table).UpdateMany(
+		ctx, bson.M{}, bson.M{"$unset": bson.M{column: ""}},
+	)
+	return err
+}
+
+func (m *Migrator) AlterColumn(table, column, newType string) error {
+	return nil
+}
+
+func (m *Migrator) HasColumn(table, column string) bool {
+	return false
+}
+
+func (m *Migrator) RenameColumn(table, oldName, newName string) error {
+	ctx := context.Background()
+	_, err := m.driver.database.Collection(table).UpdateMany(
+		ctx, bson.M{oldName: bson.M{"$exists": true}},
+		bson.M{"$rename": bson.M{oldName: newName}},
+	)
+	return err
+}
+
+func (m *Migrator) CreateIndex(table, name string, fields []string, unique bool) error {
+	ctx := context.Background()
 	keys := bson.D{}
-	for _, field := range fields {
-		keys = append(keys, bson.E{Key: field, Value: 1})
+	for _, f := range fields {
+		keys = append(keys, bson.E{Key: f, Value: 1})
 	}
-
-	index := mongo.IndexModel{
+	model := mongo.IndexModel{
 		Keys:    keys,
 		Options: options.Index().SetName(name).SetUnique(unique),
 	}
-
-	_, err := m.driver.database.Collection(collection).Indexes().CreateOne(ctx, index)
+	_, err := m.driver.database.Collection(table).Indexes().CreateOne(ctx, model)
 	if err != nil {
-		return fmt.Errorf("failed to create index: %w", err)
+		return fmt.Errorf("mongodb: create index %s: %w", name, err)
 	}
 	return nil
 }
 
-// DropIndex drops an index
-func (m *Migrator) DropIndex(collection, name string) error {
+func (m *Migrator) DropIndex(table, name string) error {
 	ctx := context.Background()
-	_, err := m.driver.database.Collection(collection).Indexes().DropOne(ctx, name)
+	_, err := m.driver.database.Collection(table).Indexes().DropOne(ctx, name)
 	if err != nil {
-		return fmt.Errorf("failed to drop index: %w", err)
+		return fmt.Errorf("mongodb: drop index %s: %w", name, err)
 	}
 	return nil
 }
 
-// HasIndex checks if an index exists
-func (m *Migrator) HasIndex(collection, name string) bool {
+func (m *Migrator) HasIndex(table, name string) bool {
 	ctx := context.Background()
-
-	cursor, err := m.driver.database.Collection(collection).Indexes().List(ctx)
+	cursor, err := m.driver.database.Collection(table).Indexes().List(ctx)
 	if err != nil {
 		return false
 	}
 	defer cursor.Close(ctx)
-
 	for cursor.Next(ctx) {
-		var index bson.M
-		if err := cursor.Decode(&index); err != nil {
+		var idx bson.M
+		if err := cursor.Decode(&idx); err != nil {
 			continue
 		}
-		if indexName, ok := index["name"].(string); ok && indexName == name {
+		if n, ok := idx["name"].(string); ok && n == name {
 			return true
 		}
 	}
-
 	return false
 }
 
-// GetIndexes returns all indexes for a collection
-func (m *Migrator) GetIndexes(collection string) ([]dialect.Index, error) {
+func (m *Migrator) GetIndexes(table string) ([]dialect.Index, error) {
 	ctx := context.Background()
-
-	cursor, err := m.driver.database.Collection(collection).Indexes().List(ctx)
+	cursor, err := m.driver.database.Collection(table).Indexes().List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list indexes: %w", err)
+		return nil, fmt.Errorf("mongodb: list indexes for %s: %w", table, err)
 	}
 	defer cursor.Close(ctx)
 
 	var indexes []dialect.Index
 	for cursor.Next(ctx) {
-		var indexDoc bson.M
-		if err := cursor.Decode(&indexDoc); err != nil {
+		var doc bson.M
+		if err := cursor.Decode(&doc); err != nil {
 			continue
 		}
-
-		index := dialect.Index{
-			Name: indexDoc["name"].(string),
+		idx := dialect.Index{Name: doc["name"].(string)}
+		if u, ok := doc["unique"].(bool); ok {
+			idx.Unique = u
 		}
-
-		if unique, ok := indexDoc["unique"].(bool); ok {
-			index.Unique = unique
-		}
-
-		indexes = append(indexes, index)
+		indexes = append(indexes, idx)
 	}
-
 	return indexes, nil
-}
-
-// AddColumn is a no-op for MongoDB (schemaless)
-func (m *Migrator) AddColumn(collection, field string) error {
-	// MongoDB is schemaless, columns don't need to be explicitly added
-	return nil
-}
-
-// DropColumn is a no-op for MongoDB (schemaless)
-func (m *Migrator) DropColumn(collection, field string) error {
-	// MongoDB is schemaless, but we could unset the field from all documents
-	ctx := context.Background()
-	_, err := m.driver.database.Collection(collection).UpdateMany(
-		ctx,
-		bson.M{},
-		bson.M{"$unset": bson.M{field: ""}},
-	)
-	return err
-}
-
-// AlterColumn is a no-op for MongoDB (schemaless)
-func (m *Migrator) AlterColumn(collection, field string) error {
-	// MongoDB is schemaless, no column types to alter
-	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/gomodul/db/clause"
+	"github.com/gomodul/db/dialect"
 	"github.com/gomodul/db/schema"
 )
 
@@ -38,5 +39,5 @@ type Statement struct {
 	attrs                []interface{}
 	assigns              []interface{}
 	scopes               []func(*DB) *DB
-	Result               *Result
+	Result               *dialect.Result
 }

@@ -103,9 +103,7 @@ func (t *RESTTranslator) buildResourcePath(q *query.Query) string {
 	if q.Collection != "" {
 		return q.Collection
 	}
-	// Extract resource name from model
-	// TODO: Use reflection or naming convention
-	return "resource"
+	return modelCollectionName(q.Model)
 }
 
 func (t *RESTTranslator) buildQueryParams(q *query.Query, params url.Values) {

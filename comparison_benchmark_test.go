@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -77,11 +78,11 @@ func BenchmarkRealWorld_InsertBatch(b *testing.B) {
 func BenchmarkRealWorld_FindSingle(b *testing.B) {
 	db := setupTestDB(b)
 	type User struct {
-		ID        int64
-		Name      string
-		Email     string
-		Age       int
-		Status    string
+		ID     int64
+		Name   string
+		Email  string
+		Age    int
+		Status string
 	}
 
 	b.ResetTimer()
@@ -95,11 +96,11 @@ func BenchmarkRealWorld_FindSingle(b *testing.B) {
 func BenchmarkRealWorld_FindMany(b *testing.B) {
 	db := setupTestDB(b)
 	type User struct {
-		ID        int64
-		Name      string
-		Email     string
-		Age       int
-		Status    string
+		ID     int64
+		Name   string
+		Email  string
+		Age    int
+		Status string
 	}
 
 	b.ResetTimer()
@@ -236,7 +237,7 @@ func BenchmarkRealWorld_Transaction(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = db.Transaction(func(tx *DB) error {
+		_ = db.Transaction(context.Background(), func(tx *DB) error {
 			// Create user
 			user := &User{
 				Name:   fmt.Sprintf("User%d", i),
@@ -330,9 +331,9 @@ func BenchmarkRealWorld_Pagination(b *testing.B) {
 func BenchmarkRealWorld_Subquery(b *testing.B) {
 	db := setupTestDB(b)
 	type User struct {
-		ID     int64
-		Name   string
-		Email  string
+		ID    int64
+		Name  string
+		Email string
 	}
 	type Order struct {
 		ID     int64

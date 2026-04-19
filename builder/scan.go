@@ -148,12 +148,94 @@ func (r *Rows) Next() bool {
 	return r.index < len(r.data)
 }
 
-// Scan scans the current row into dest
+// Scan copies the current row into dest.
+// dest must be a pointer to a struct, map, or the same concrete type returned by the driver.
 func (r *Rows) Scan(dest interface{}) error {
 	if r.index < 0 || r.index >= len(r.data) {
 		return ErrNotFound
 	}
-	// Would use the builder's scanning logic
+	src := r.data[r.index]
+	return scanInto(dest, src)
+}
+
+// scanInto copies src into dest using reflection.
+func scanInto(dest, src interface{}) error {
+	if dest == nil {
+		return fmt.Errorf("scan: dest must not be nil")
+	}
+
+	destVal := reflect.ValueOf(dest)
+	if destVal.Kind() != reflect.Ptr || destVal.IsNil() {
+		return fmt.Errorf("scan: dest must be a non-nil pointer")
+	}
+	destElem := destVal.Elem()
+
+	srcVal := reflect.ValueOf(src)
+	if srcVal.Kind() == reflect.Ptr {
+		srcVal = srcVal.Elem()
+	}
+
+	// Direct assignment if types match
+	if srcVal.Type().AssignableTo(destElem.Type()) {
+		destElem.Set(srcVal)
+		return nil
+	}
+
+	// map[string]interface{} → struct
+	if srcVal.Kind() == reflect.Map && destElem.Kind() == reflect.Struct {
+		return mapToStruct(srcVal, destElem)
+	}
+
+	// struct → struct (field-by-field by name)
+	if srcVal.Kind() == reflect.Struct && destElem.Kind() == reflect.Struct {
+		return structToStruct(srcVal, destElem)
+	}
+
+	return fmt.Errorf("scan: cannot scan %T into %T", src, dest)
+}
+
+func mapToStruct(m, s reflect.Value) error {
+	t := s.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := getFieldName(field)
+		if name == "-" {
+			continue
+		}
+		val := m.MapIndex(reflect.ValueOf(name))
+		if !val.IsValid() {
+			continue
+		}
+		fv := s.Field(i)
+		v := reflect.ValueOf(val.Interface())
+		if v.Type().ConvertibleTo(fv.Type()) {
+			fv.Set(v.Convert(fv.Type()))
+		}
+	}
+	return nil
+}
+
+func structToStruct(src, dst reflect.Value) error {
+	dstType := dst.Type()
+	for i := 0; i < dstType.NumField(); i++ {
+		field := dstType.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		srcField := src.FieldByName(field.Name)
+		if !srcField.IsValid() {
+			continue
+		}
+		dstField := dst.Field(i)
+		if srcField.Type().AssignableTo(dstField.Type()) {
+			dstField.Set(srcField)
+		} else if srcField.Type().ConvertibleTo(dstField.Type()) {
+			dstField.Set(srcField.Convert(dstField.Type()))
+		}
+	}
 	return nil
 }
 

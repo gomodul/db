@@ -12,7 +12,6 @@ import (
 	"github.com/gomodul/db/internal/security"
 	"github.com/gomodul/db/logger"
 	"github.com/gomodul/db/metrics"
-	"github.com/gomodul/db/migrate"
 	"github.com/gomodul/db/pool"
 	"github.com/gomodul/db/query"
 )
@@ -21,6 +20,7 @@ import (
 // a fluent API for building and executing queries.
 //
 // Example:
+//
 //	db, err := db.Open(db.Config{DSN: "postgres://user:pass@localhost:5432/mydb"})
 //	defer db.Close()
 //
@@ -29,115 +29,37 @@ import (
 type DB struct {
 	*Config
 
-	// ============================================================
-	// LEGACY FIELDS - Deprecated, will be removed in v2.0.0
-	// ============================================================
-	//
-	// DEPRECATED: Use Driver instead. This field is kept for backward compatibility
-	// and will be removed in future versions. The new Driver interface provides
-	// universal support across all database types (SQL, NoSQL, APIs, etc.)
-	//
-	// Migration guide:
-	//   OLD: db.SQL.Exec(...)
-	//   NEW: db.Driver.Execute(ctx, query)
-	SQL *sql.DB // SQL database connection for SQL databases (deprecated)
+	Driver dialect.Driver // universal driver
+	Caps   *dialect.Capabilities
 
-	// DEPRECATED: Use Driver instead. The Client interface was an intermediate
-	// abstraction that has been superseded by the universal Driver interface.
-	//
-	// Migration guide:
-	//   OLD: db.Client.Query(...)
-	//   NEW: db.Driver.Execute(ctx, query)
-	Client Client // Generic client interface for NoSQL/API databases (deprecated)
-
-	// DEPRECATED: Use Driver instead. The Dialector interface has been replaced
-	// by the more comprehensive Driver interface that supports all database types.
-	//
-	// Migration guide:
-	//   OLD: db.Dialector.Name()
-	//   NEW: db.Driver.Type()
-	Dialector Dialector // The old dialector interface (deprecated)
-
-	// ============================================================
-	// NEW FIELDS - Universal Driver Support
-	// ============================================================
-	//
-	// Driver is the universal driver that supports all database types:
-	// - SQL databases: PostgreSQL, MySQL, SQLite, etc.
-	// - NoSQL databases: MongoDB, Redis, Elasticsearch, etc.
-	// - APIs: REST, GraphQL, gRPC, Kafka, etc.
-	//
-	// The Driver interface provides a single, consistent API for all database
-	// operations regardless of the underlying backend.
-	Driver dialect.Driver // The new universal driver (use this)
-
-	// Caps contains the driver's capabilities and features
-	// Use this to check what operations are supported by the current driver.
-	Caps *dialect.Capabilities
-
-	// ============================================================
-	// CROSS-CUTTING CONCERNS
-	// ============================================================
-
-	// Logger handles query logging and metrics
-	Logger logger.Logger
-
-	// QueryCache caches query results for improved performance
-	QueryCache *cache.QueryCache
-
-	// PoolMonitor monitors connection pool statistics and health
+	Logger      logger.Logger
+	QueryCache  *cache.QueryCache
 	PoolMonitor *pool.Monitor
+	Metrics     metrics.Collector
 
-	// Metrics collector for custom metrics
-	Metrics metrics.Collector
-
-	// ============================================================
-	// QUERY STATE
-	// ============================================================
-
-	Error        error    // Last error encountered
-	RowsAffected int64    // Number of rows affected by last operation
-	Statement    *Statement // Last statement information
-	clone        int      // Internal: clone counter for session management
+	Error        error
+	RowsAffected int64
+	Statement    *Statement
+	clone        int
 }
 
-// IsLegacyMode returns true if the DB is using legacy fields (SQL/Client/Dialector)
-// instead of the new Driver interface.
-func (db *DB) IsLegacyMode() bool {
-	return db.SQL != nil || db.Client != nil || db.Dialector != nil
-}
-
-// GetDriver returns the active driver, with fallback to legacy fields for backward compatibility.
-// This method helps migrate from legacy to new Driver interface.
+// GetDriver returns the active driver.
 func (db *DB) GetDriver() dialect.Driver {
-	// Prefer new Driver interface
-	if db.Driver != nil {
-		return db.Driver
-	}
-
-	// Fallback to legacy fields for backward compatibility
-	if db.SQL != nil {
-		// TODO: Create a wrapper that converts sql.DB to dialect.Driver
-		return nil
-	}
-	if db.Client != nil {
-		// TODO: Create a wrapper that converts Client to dialect.Driver
-		return nil
-	}
-
-	return nil
+	return db.Driver
 }
 
-// UseDriver switches to using the new Driver interface exclusively.
-// This is the recommended method for migrating from legacy code.
+// UseDriver sets the driver and updates capabilities.
 func (db *DB) UseDriver(driver dialect.Driver) {
 	db.Driver = driver
 	db.Caps = driver.Capabilities()
+}
 
-	// Clear legacy fields to force using new Driver
-	db.SQL = nil
-	db.Client = nil
-	db.Dialector = nil
+// sqlDB returns the underlying *sql.DB when the driver implements dialect.SQLAccessor.
+func (db *DB) sqlDB() *sql.DB {
+	if a, ok := db.Driver.(dialect.SQLAccessor); ok {
+		return a.UnderlyingSQL()
+	}
+	return nil
 }
 
 // Open opens a database connection using the registered driver for the given DSN.
@@ -154,9 +76,9 @@ func Open(cfg Config) (*DB, error) {
 
 	// Convert driver config
 	driverCfg := &dialect.Config{
-		DSN:            cfg.DSN,
-		MaxOpenConns:   cfg.MaxOpenConns,
-		MaxIdleConns:   cfg.MaxIdleConns,
+		DSN:             cfg.DSN,
+		MaxOpenConns:    cfg.MaxOpenConns,
+		MaxIdleConns:    cfg.MaxIdleConns,
 		ConnMaxLifetime: cfg.ConnMaxLifetime,
 		ConnMaxIdleTime: cfg.ConnMaxIdleTime,
 		RetryMaxRetries: cfg.RetryMaxRetries,
@@ -218,9 +140,9 @@ func Open(cfg Config) (*DB, error) {
 // OpenWithDriver opens a database connection with a specific driver
 func OpenWithDriver(drvr dialect.Driver, cfg Config) (*DB, error) {
 	driverCfg := &dialect.Config{
-		DSN:            cfg.DSN,
-		MaxOpenConns:   cfg.MaxOpenConns,
-		MaxIdleConns:   cfg.MaxIdleConns,
+		DSN:             cfg.DSN,
+		MaxOpenConns:    cfg.MaxOpenConns,
+		MaxIdleConns:    cfg.MaxIdleConns,
 		ConnMaxLifetime: cfg.ConnMaxLifetime,
 		ConnMaxIdleTime: cfg.ConnMaxIdleTime,
 		RetryMaxRetries: cfg.RetryMaxRetries,
@@ -262,29 +184,23 @@ func (db *DB) Close() error {
 	if db.Driver != nil {
 		return db.Driver.Close()
 	}
-	if db.SQL != nil {
-		return db.SQL.Close()
-	}
 	return nil
 }
 
-// Session creates a new session for the database
+// Session creates a new session for the database.
 func (db *DB) Session() *DB {
 	return &DB{
-		Config:  db.Config,
-		Driver:  db.Driver,
-		Caps:    db.Caps,
-		SQL:     db.SQL,
-		Client:  db.Client,
-		Dialector: db.Dialector,
-		clone:   1,
+		Config: db.Config,
+		Driver: db.Driver,
+		Caps:   db.Caps,
+		clone:  1,
 	}
 }
 
-// DB returns the underlying *sql.DB for SQL databases (legacy)
+// DB returns the underlying *sql.DB for SQL drivers that expose it.
 func (db *DB) DB() (*sql.DB, error) {
-	if db.SQL != nil {
-		return db.SQL, nil
+	if s := db.sqlDB(); s != nil {
+		return s, nil
 	}
 	return nil, ErrNotSupported
 }
@@ -333,14 +249,13 @@ func (db *DB) Health() (*dialect.HealthStatus, error) {
 	return dialect.Health(db.Driver)
 }
 
-// Transaction executes a function within a transaction (if supported)
-func (db *DB) Transaction(fn func(tx *DB) error) error {
+// TransactionContext executes fn within a transaction using the provided context.
+func (db *DB) Transaction(ctx context.Context, fn func(tx *DB) error) error {
 	if db.Driver == nil || !db.Caps.Transaction.Supported {
 		return ErrNotSupported
 	}
 
-	// Use the helper function from dialect package
-	tx, err := dialect.BeginTx(context.Background(), db.Driver)
+	tx, err := dialect.BeginTx(ctx, db.Driver)
 	if err != nil {
 		return err
 	}
@@ -387,38 +302,29 @@ func (db *DB) Execute(ctx context.Context, q *query.Query) (*dialect.Result, err
 
 // Legacy methods (for backward compatibility)
 
-// Exec executes a query without returning any rows (legacy SQL method)
+// Exec executes a query without returning any rows.
 //
-// SECURITY WARNING: Always use parameterized queries with placeholders.
-//   ✅ GOOD: db.Exec("UPDATE users SET name = ? WHERE id = ?", "John", 1)
-//   ❌ BAD:  db.Exec("UPDATE users SET name = '" + name + "' WHERE id = " + id)
-func (db *DB) Exec(sql string, values ...interface{}) *DB {
-	// Validate raw query for security
+// SECURITY WARNING: Always use parameterized queries.
+//
+//	✅ GOOD: db.Exec(ctx, "UPDATE users SET name = ? WHERE id = ?", "John", 1)
+//	❌ BAD:  db.Exec(ctx, "UPDATE users SET name = '" + name + "'")
+func (db *DB) Exec(ctx context.Context, sql string, values ...interface{}) *DB {
 	if warnings, err := security.ValidateRawQuery(sql, nil); err != nil {
 		db.Error = fmt.Errorf("raw query validation failed: %w", err)
 		return db
 	} else if len(warnings) > 0 && db.Logger != nil {
-		// Log warnings
 		for _, w := range warnings {
-			db.Logger.Log(context.Background(), logger.Warn, fmt.Sprintf("Raw query security warning [%s]: %s\nQuery: %s", w.Severity, w.Message, sql))
+			db.Logger.Log(ctx, logger.Warn, fmt.Sprintf("raw query security warning [%s]: %s — query: %s", w.Severity, w.Message, sql))
 		}
 	}
 
-	if db.SQL != nil {
-		result, err := db.SQL.Exec(sql, values...)
-		if err != nil {
-			db.Error = security.AddSecurityWarningToError(err, sql)
-			return db
-		}
-		db.RowsAffected, _ = result.RowsAffected()
-	} else if db.Driver != nil {
-		// Try to execute through new driver
+	if db.Driver != nil {
 		q := &query.Query{
-			Raw:    sql,
+			Raw:     sql,
 			RawArgs: values,
-			IsRaw:  true,
+			IsRaw:   true,
 		}
-		result, err := db.Driver.Execute(context.Background(), q)
+		result, err := db.Driver.Execute(ctx, q)
 		if err != nil {
 			db.Error = security.AddSecurityWarningToError(err, sql)
 			return db
@@ -428,50 +334,54 @@ func (db *DB) Exec(sql string, values ...interface{}) *DB {
 	return db
 }
 
-// Raw creates a raw SQL query (legacy)
+// Raw stores a raw SQL query for deferred execution via Scan.
 //
 // SECURITY WARNING: Always use parameterized queries with placeholders.
-//   ✅ GOOD: db.Raw("SELECT * FROM users WHERE id = ?", userID)
-//   ❌ BAD:  db.Raw("SELECT * FROM users WHERE id = " + userID)
+//
+//	✅ GOOD: db.Raw("SELECT * FROM users WHERE id = ?", userID).Scan(&users)
+//	❌ BAD:  db.Raw("SELECT * FROM users WHERE id = " + userID)
 func (db *DB) Raw(sql string, values ...interface{}) *DB {
-	// Validate raw query for security
 	if warnings, err := security.ValidateRawQuery(sql, nil); err != nil {
 		db.Error = fmt.Errorf("raw query validation failed: %w", err)
 		return db
 	} else if len(warnings) > 0 && db.Logger != nil {
-		// Log warnings
 		for _, w := range warnings {
-			db.Logger.Log(context.Background(), logger.Warn, fmt.Sprintf("Raw query security warning [%s]: %s\nQuery: %s", w.Severity, w.Message, sql))
+			db.Logger.Log(context.Background(), logger.Warn,
+				fmt.Sprintf("raw query security warning [%s]: %s — query: %s", w.Severity, w.Message, sql))
 		}
 	}
 
-	if db.SQL != nil {
-		rows, err := db.SQL.Query(sql, values...)
-		if err != nil {
-			db.Error = security.AddSecurityWarningToError(err, sql)
-			return db
-		}
-		defer rows.Close()
-	} else if db.Driver != nil {
-		q := &query.Query{
-			Operation: query.OpFind,
-			Raw:       sql,
-			RawArgs:    values,
-			IsRaw:     true,
-		}
-		_, err := db.Driver.Execute(context.Background(), q)
-		if err != nil {
-			db.Error = security.AddSecurityWarningToError(err, sql)
-			return db
-		}
-	}
-	return db
+	clone := db.Session()
+	stmt := &Statement{}
+	stmt.SQL.WriteString(sql)
+	stmt.Vars = values
+	clone.Statement = stmt
+	return clone
 }
 
-// Scan scans the result into a destination (legacy placeholder)
+// Scan executes the raw query stored by Raw and scans results into dest.
+// For fluent query building use Model().Where(...).Find(&dest) instead.
 func (db *DB) Scan(dest interface{}) *DB {
-	// Implementation for scanning results
-	// This will be replaced by the new query builder
+	if db.Statement == nil || db.Statement.SQL.Len() == 0 {
+		return db
+	}
+	rawSQL := db.Statement.SQL.String()
+	if db.Driver != nil {
+		q := &query.Query{
+			Operation: query.OpFind,
+			Raw:       rawSQL,
+			RawArgs:   db.Statement.Vars,
+			IsRaw:     true,
+		}
+		result, err := db.Driver.Execute(db.Statement.Context, q)
+		if err != nil {
+			db.Error = security.AddSecurityWarningToError(err, rawSQL)
+			return db
+		}
+		if result != nil {
+			db.RowsAffected = result.RowsAffected
+		}
+	}
 	return db
 }
 
@@ -480,6 +390,7 @@ func (db *DB) Model(value interface{}) *builder.QueryBuilder {
 	b := &builder.DB{
 		Dialect: db.Driver,
 		Caps:    db.Caps,
+		Logger:  db.Logger,
 	}
 	return builder.New(b, value)
 }
@@ -489,112 +400,94 @@ func (db *DB) Table(name string) *builder.QueryBuilder {
 	b := &builder.DB{
 		Dialect: db.Driver,
 		Caps:    db.Caps,
+		Logger:  db.Logger,
 	}
 	return builder.New(b, nil).Table(name)
 }
 
 // ============ Connection Pool Monitoring Methods ============
 
-// GetPoolStats returns current connection pool statistics
-// Returns nil if the driver doesn't support connection pooling (e.g., NoSQL/API drivers)
+// GetPoolStats returns current connection pool statistics.
+// Returns ErrNotSupported for drivers that don't expose a *sql.DB.
 func (db *DB) GetPoolStats(ctx context.Context) (*pool.Stats, error) {
 	if db.PoolMonitor != nil {
 		return db.PoolMonitor.GetStats(ctx)
 	}
-
-	// Fallback to SQL driver stats
-	if db.SQL != nil {
-		stats := db.SQL.Stats()
+	if s := db.sqlDB(); s != nil {
+		st := s.Stats()
 		return &pool.Stats{
-			OpenConnections:    stats.OpenConnections,
-			InUse:              stats.InUse,
-			Idle:               stats.Idle,
-			WaitCount:          stats.WaitCount,
-			WaitDuration:       stats.WaitDuration,
-			MaxIdleClosed:      stats.MaxIdleClosed,
-			MaxLifetimeClosed:  stats.MaxLifetimeClosed,
-			MaxOpenConnections: stats.MaxOpenConnections,
+			OpenConnections:    st.OpenConnections,
+			InUse:              st.InUse,
+			Idle:               st.Idle,
+			WaitCount:          st.WaitCount,
+			WaitDuration:       st.WaitDuration,
+			MaxIdleClosed:      st.MaxIdleClosed,
+			MaxLifetimeClosed:  st.MaxLifetimeClosed,
+			MaxOpenConnections: st.MaxOpenConnections,
 			Timestamp:          time.Now(),
 		}, nil
 	}
-
 	return nil, ErrNotSupported
 }
 
-// GetPoolHealth checks the health of the connection pool
-// Returns nil if the driver doesn't support connection pooling
+// GetPoolHealth checks the health of the connection pool.
 func (db *DB) GetPoolHealth(ctx context.Context) (*pool.HealthStatus, error) {
 	if db.PoolMonitor != nil {
 		return db.PoolMonitor.GetHealthStatus(ctx)
 	}
-
-	// Fallback to basic health check
-	if db.SQL != nil {
-		stats := db.SQL.Stats()
-		status := &pool.HealthStatus{
-			Healthy: true,
-			Timestamp: time.Now(),
-		}
-
-		// Basic health check
-		if stats.MaxOpenConnections > 0 {
-			usage := float64(stats.InUse) / float64(stats.MaxOpenConnections)
+	if s := db.sqlDB(); s != nil {
+		st := s.Stats()
+		status := &pool.HealthStatus{Healthy: true, Timestamp: time.Now()}
+		if st.MaxOpenConnections > 0 {
+			usage := float64(st.InUse) / float64(st.MaxOpenConnections)
 			if usage > 0.9 {
 				status.Healthy = false
 				status.Warnings = append(status.Warnings,
 					fmt.Sprintf("High connection usage: %.2f%%", usage*100))
 			}
 		}
-
 		return status, nil
 	}
-
 	return nil, ErrNotSupported
 }
 
-// EnablePoolMonitoring enables connection pool monitoring
-// This only works for SQL drivers with connection pooling
+// EnablePoolMonitoring enables connection pool monitoring for SQL drivers.
 func (db *DB) EnablePoolMonitoring(cfg *pool.Config) error {
-	if db.SQL == nil {
+	s := db.sqlDB()
+	if s == nil {
 		return ErrNotSupported
 	}
-
 	if cfg == nil {
 		cfg = pool.DefaultConfig()
 		cfg.Name = "default"
 	}
-
-	db.PoolMonitor = pool.NewMonitor(db.SQL, cfg)
+	db.PoolMonitor = pool.NewMonitor(s, cfg)
 	db.Metrics = cfg.Metrics
-
 	return nil
 }
 
-// DisablePoolMonitoring disables connection pool monitoring
+// DisablePoolMonitoring disables connection pool monitoring.
 func (db *DB) DisablePoolMonitoring() {
 	db.PoolMonitor = nil
 }
 
-// GetPoolInfo returns connection pool information
+// GetPoolInfo returns connection pool information.
 func (db *DB) GetPoolInfo() *pool.PoolInfo {
 	if db.PoolMonitor != nil {
 		return db.PoolMonitor.GetPoolInfo()
 	}
-
-	// Fallback to SQL driver stats
-	if db.SQL != nil {
-		stats := db.SQL.Stats()
+	if s := db.sqlDB(); s != nil {
+		st := s.Stats()
 		return &pool.PoolInfo{
 			Name:               "default",
-			MaxOpenConnections: stats.MaxOpenConnections,
-			CurrentOpen:        stats.OpenConnections,
-			InUse:              stats.InUse,
-			Idle:               stats.Idle,
-			WaitCount:          stats.WaitCount,
-			TotalWaitDuration:  stats.WaitDuration,
+			MaxOpenConnections: st.MaxOpenConnections,
+			CurrentOpen:        st.OpenConnections,
+			InUse:              st.InUse,
+			Idle:               st.Idle,
+			WaitCount:          st.WaitCount,
+			TotalWaitDuration:  st.WaitDuration,
 		}
 	}
-
 	return nil
 }
 
@@ -609,81 +502,22 @@ func (db *DB) CollectPoolMetrics(ctx context.Context) error {
 
 // ============ Schema Migration Methods ============
 
-// AutoMigrate automatically creates/updates database schema for the given models
-// This is a convenient method that uses the migrate package internally
+// AutoMigrate automatically creates/updates database schema for the given models.
 //
 // Example:
 //
 //	err := database.AutoMigrate(&User{}, &Order{}, &Product{})
 func (db *DB) AutoMigrate(models ...interface{}) error {
-	ctx := context.Background()
-
-	// Use SQL database directly if available (for legacy mode)
-	if db.SQL != nil {
-		migrator := migrate.NewMigrator(&sqlDB{db: db.SQL}, db.Driver)
-		return migrator.AutoMigrate(ctx, models...)
-	}
-
-	// For new driver interface, we need to check if it supports migrations
-	if db.Driver != nil {
-		// Check if driver implements the migration interface
-		if migrator, ok := db.Driver.(interface{ AutoMigrate(...interface{}) error }); ok {
-			return migrator.AutoMigrate(models...)
-		}
-	}
-
-	return ErrNotSupported
+	return db.Migrator().AutoMigrate(models...)
 }
 
-// Migrator returns a new Migrator instance for advanced schema operations
+// Migrator returns a dialect.Migrator for advanced schema operations.
 //
 // Example:
 //
-//	migrator := db.Migrator()
-//	err := migrator.AutoMigrate(ctx, &User{})
-//	err = migrator.CreateIndex(ctx, &User{}, &migrate.IndexInfo{
-//	    Name:    "idx_user_email",
-//	    Columns: []string{"email"},
-//	    Unique:  true,
-//	})
-func (db *DB) Migrator() *migrate.Migrator {
-	if db.SQL != nil {
-		return migrate.NewMigrator(&sqlDB{db: db.SQL}, db.Driver)
-	}
-	return migrate.NewMigrator(nil, db.Driver)
-}
-
-// sqlDB wraps *sql.DB to implement the migrate.DB interface
-type sqlDB struct {
-	db *sql.DB
-}
-
-// Exec implements migrate.DB
-func (s *sqlDB) Exec(ctx context.Context, sql string, args ...interface{}) error {
-	_, err := s.db.ExecContext(ctx, sql, args...)
-	return err
-}
-
-// Query implements migrate.DB
-func (s *sqlDB) Query(ctx context.Context, sql string, args ...interface{}) (migrate.Result, error) {
-	rows, err := s.db.QueryContext(ctx, sql, args...)
-	if err != nil {
-		return nil, err
-	}
-	return &sqlResult{rows: rows}, nil
-}
-
-// sqlResult wraps sql.Rows to implement migrate.Result
-type sqlResult struct {
-	rows *sql.Rows
-}
-
-// Columns implements migrate.Result
-func (s *sqlResult) Columns() ([]string, error) {
-	return s.rows.Columns()
-}
-
-// Close implements migrate.Result
-func (s *sqlResult) Close() error {
-	return s.rows.Close()
+//	m := db.Migrator()
+//	err := m.AutoMigrate(&User{})
+//	err = m.CreateIndex("users", "idx_email", []string{"email"}, true)
+func (db *DB) Migrator() dialect.Migrator {
+	return dialect.GetMigrator(db.Driver)
 }

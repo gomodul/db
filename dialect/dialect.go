@@ -2,6 +2,7 @@ package dialect
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/gomodul/db/query"
 )
@@ -40,6 +41,12 @@ type Transactor interface {
 // Migrator is an optional interface for databases that support schema migration
 type SchemaMigrator interface {
 	Migrator() Migrator
+}
+
+// SQLAccessor is an optional interface for SQL drivers that expose the underlying *sql.DB.
+// Used for connection pool monitoring.
+type SQLAccessor interface {
+	UnderlyingSQL() *sql.DB
 }
 
 // HealthChecker is an optional interface for databases that support health checks

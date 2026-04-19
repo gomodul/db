@@ -150,17 +150,29 @@ func (t *SQLTranslator) buildSelect(builder *strings.Builder, q *query.Query, ar
 }
 
 func (t *SQLTranslator) buildInsert(builder *strings.Builder, q *query.Query, args *[]interface{}, bindIdx *int) {
+	columns, values := extractFields(q.Document)
+
 	builder.WriteString("INSERT INTO ")
 	builder.WriteString(t.dialect.QuoteIdentifier(q.Collection))
 	builder.WriteString(" (")
-
-	// TODO: Extract fields from model/document
+	for i, col := range columns {
+		if i > 0 {
+			builder.WriteString(", ")
+		}
+		builder.WriteString(t.dialect.QuoteIdentifier(col))
+	}
 	builder.WriteString(") VALUES (")
-
-	// TODO: Add bind variables
+	for i, val := range values {
+		if i > 0 {
+			builder.WriteString(", ")
+		}
+		builder.WriteString(t.dialect.BindVar(*bindIdx))
+		*args = append(*args, val)
+		*bindIdx++
+	}
 	builder.WriteString(")")
 
-	if t.dialect.Supports(FeatureReturningClause) && q.Operation == query.OpCreate {
+	if t.dialect.Supports(FeatureReturningClause) {
 		builder.WriteString(" RETURNING *")
 	}
 }
@@ -170,7 +182,18 @@ func (t *SQLTranslator) buildUpdate(builder *strings.Builder, q *query.Query, ar
 	builder.WriteString(t.dialect.QuoteIdentifier(q.Collection))
 	builder.WriteString(" SET ")
 
-	// TODO: Build SET clause from updates
+	i := 0
+	for col, val := range q.Updates {
+		if i > 0 {
+			builder.WriteString(", ")
+		}
+		builder.WriteString(t.dialect.QuoteIdentifier(col))
+		builder.WriteString(" = ")
+		builder.WriteString(t.dialect.BindVar(*bindIdx))
+		*args = append(*args, val)
+		*bindIdx++
+		i++
+	}
 
 	if len(q.Filters) > 0 {
 		t.buildWhere(builder, q.Filters, args, bindIdx)

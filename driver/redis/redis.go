@@ -330,6 +330,11 @@ func formatValue(v interface{}) string {
 	}
 }
 
+// Migrator returns the dialect.Migrator for schema operations
+func (d *Driver) Migrator() dialect.Migrator {
+	return &Migrator{driver: d}
+}
+
 func init() {
 	// Register the Redis driver
 	dialect.Register("redis", func() dialect.Driver {

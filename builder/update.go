@@ -23,14 +23,14 @@ func (b *QueryBuilder) UpdateColumnExpr(column, expr string) *QueryBuilder {
 	return b
 }
 
-// Increment increments a column by a value
+// Increment increments a column by value.
 func (b *QueryBuilder) Increment(column string, value interface{}) *QueryBuilder {
-	return b.UpdateColumnExpr(column, column+" + ?")
+	return b.UpdateColumnExpr(column, fmt.Sprintf("%s + %v", column, value))
 }
 
-// Decrement decrements a column by a value
+// Decrement decrements a column by value.
 func (b *QueryBuilder) Decrement(column string, value interface{}) *QueryBuilder {
-	return b.UpdateColumnExpr(column, column+" - ?")
+	return b.UpdateColumnExpr(column, fmt.Sprintf("%s - %v", column, value))
 }
 
 // ============ Condition-Based Updates ============
@@ -106,12 +106,8 @@ func (b *QueryBuilder) OnConflictUpdate(columns ...string) *QueryBuilder {
 
 // OnConflict represents an ON CONFLICT clause
 type OnConflict struct {
-	b           *QueryBuilder
-	targets     []string
-	updateWhere  string
-	doNothing   bool
-	updateCols   []string
-	updateExpr  string
+	b       *QueryBuilder
+	targets []string
 }
 
 // DoNothing sets the ON CONFLICT action to do nothing
@@ -140,20 +136,6 @@ func (oc *OnConflict) Update(updates map[string]interface{}) *QueryBuilder {
 	return oc.b
 }
 
-// Where adds a WHERE clause to the ON CONFLICT UPDATE
-func (oc *OnConflict) Where(filter interface{}, args ...interface{}) *OnConflict {
-	oc.updateWhere = parseFilterToString(filter, args...)
-	return oc
-}
-
-// parseFilterToString converts a filter to string representation
-func parseFilterToString(filter interface{}, args ...interface{}) string {
-	// Simple implementation - can be expanded later
-	if s, ok := filter.(string); ok {
-		return s
-	}
-	return ""
-}
 
 // ============ Bulk Operations ============
 
@@ -315,14 +297,14 @@ func (b *QueryBuilder) getPrimaryKeyField() string {
 
 // ============ Soft Delete Methods ============
 
-// SoftDelete performs a soft delete (sets deleted_at field)
+// SoftDelete performs a soft delete (sets deleted_at to current time).
 func (b *QueryBuilder) SoftDelete() error {
 	if !b.hasDeletedAtField() {
 		return ErrNotSupported
 	}
 
-	return b.Update(map[string]interface{}{
-		"deleted_at": b.q.Context.Value("now"),
+	return b.Updates(map[string]interface{}{
+		"deleted_at": time.Now(),
 	})
 }
 
@@ -349,6 +331,19 @@ func (b *QueryBuilder) WithoutDeleted() *QueryBuilder {
 		b.WhereNull("deleted_at")
 	}
 	return b
+}
+
+// isUnscoped reports whether the query was explicitly marked to include deleted records.
+func (b *QueryBuilder) isUnscoped() bool {
+	if b.q.Hints == nil {
+		return false
+	}
+	v, ok := b.q.Hints["unscoped"]
+	if !ok {
+		return false
+	}
+	unscoped, _ := v.(bool)
+	return unscoped
 }
 
 // hasDeletedAtField checks if the model has a deleted_at field

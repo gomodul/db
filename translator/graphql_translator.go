@@ -63,8 +63,7 @@ func (t *GraphQLTranslator) getCollectionName(q *query.Query) string {
 	if q.Collection != "" {
 		return q.Collection
 	}
-	// TODO: Extract from model using reflection
-	return "items"
+	return modelCollectionName(q.Model)
 }
 
 func (t *GraphQLTranslator) buildFindQuery(builder *strings.Builder, q *query.Query, collection string, vars map[string]interface{}) {

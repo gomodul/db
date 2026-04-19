@@ -1,84 +1,52 @@
 package sqlite
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/gomodul/db/dialect"
+	"github.com/gomodul/db/migrate"
 )
 
-// Migrator implements the dialect.Migrator interface for SQLite
+// Migrator implements the dialect.Migrator interface for SQLite.
 type Migrator struct {
 	driver *Driver
 }
 
-// CurrentDatabase returns the current database name
-func (m *Migrator) CurrentDatabase() string {
-	return "sqlite"
+func (m *Migrator) AutoMigrate(models ...interface{}) error {
+	inner := migrate.NewMigrator(&liteDB{m.driver.db}, m.driver)
+	return inner.AutoMigrate(context.Background(), models...)
 }
 
-// CreateTable creates a new table
-func (m *Migrator) CreateTable(table string, columns []dialect.ColumnDefinition) error {
-	var createSQL strings.Builder
-
-	createSQL.WriteString("CREATE TABLE ")
-	createSQL.WriteString(table)
-	createSQL.WriteString(" (")
-
-	for i, col := range columns {
-		if i > 0 {
-			createSQL.WriteString(", ")
-		}
-
-		createSQL.WriteString(col.Name)
-		createSQL.WriteString(" ")
-		createSQL.WriteString(col.Type)
-
-		if col.PrimaryKey {
-			createSQL.WriteString(" PRIMARY KEY")
-		}
-		if col.NotNull {
-			createSQL.WriteString(" NOT NULL")
-		}
-		if col.Unique {
-			createSQL.WriteString(" UNIQUE")
-		}
-		if col.Default != nil {
-			createSQL.WriteString(" DEFAULT ")
-			createSQL.WriteString(fmt.Sprintf("%v", col.Default))
-		}
+func (m *Migrator) CreateTable(name string, models ...interface{}) error {
+	if len(models) > 0 {
+		return m.AutoMigrate(models...)
 	}
-
-	createSQL.WriteString(")")
-
-	_, err := m.driver.db.Exec(createSQL.String())
+	_, err := m.driver.db.Exec("CREATE TABLE IF NOT EXISTS " + quote(name) + " (id INTEGER PRIMARY KEY AUTOINCREMENT)")
 	return err
 }
 
-// DropTable drops a table
-func (m *Migrator) DropTable(table string) error {
-	sql := "DROP TABLE " + table
-	_, err := m.driver.db.Exec(sql)
+func (m *Migrator) DropTable(name string) error {
+	_, err := m.driver.db.Exec("DROP TABLE IF EXISTS " + quote(name))
 	return err
 }
 
-// RenameTable renames a table
-func (m *Migrator) RenameTable(oldName, newName string) error {
-	_, err := m.driver.db.Exec("ALTER TABLE " + oldName + " RENAME TO " + newName)
-	return err
-}
-
-// HasTable checks if a table exists
-func (m *Migrator) HasTable(table string) bool {
+func (m *Migrator) HasTable(name string) bool {
 	var count int64
 	m.driver.db.QueryRow(
 		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
-		table,
+		name,
 	).Scan(&count)
 	return count > 0
 }
 
-// GetTables returns all table names
+func (m *Migrator) RenameTable(oldName, newName string) error {
+	_, err := m.driver.db.Exec("ALTER TABLE " + quote(oldName) + " RENAME TO " + quote(newName))
+	return err
+}
+
 func (m *Migrator) GetTables() ([]string, error) {
 	rows, err := m.driver.db.Query(
 		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -96,63 +64,57 @@ func (m *Migrator) GetTables() ([]string, error) {
 		}
 		tables = append(tables, name)
 	}
-
-	return tables, nil
+	return tables, rows.Err()
 }
 
-// HasColumn checks if a column exists in a table
 func (m *Migrator) HasColumn(table, column string) bool {
 	var count int64
 	m.driver.db.QueryRow(
 		"SELECT count(*) FROM pragma_table_info(?) WHERE name=?",
-		table,
-		column,
+		table, column,
 	).Scan(&count)
 	return count > 0
 }
 
-// AddColumn adds a column to a table
 func (m *Migrator) AddColumn(table, column, columnType string) error {
-	_, err := m.driver.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, columnType))
+	_, err := m.driver.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", quote(table), quote(column), columnType))
 	return err
 }
 
-// DropColumn drops a column from a table
+// DropColumn is not natively supported in SQLite without recreating the table.
 func (m *Migrator) DropColumn(table, column string) error {
-	// SQLite doesn't support DROP COLUMN directly, would need to recreate table
-	return fmt.Errorf("sqlite does not support dropping columns without recreating the table")
+	return fmt.Errorf("sqlite: dropping columns requires recreating the table")
 }
 
-// RenameColumn renames a column
 func (m *Migrator) RenameColumn(table, oldName, newName string) error {
-	_, err := m.driver.db.Exec(fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", table, oldName, newName))
+	_, err := m.driver.db.Exec(fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", quote(table), quote(oldName), quote(newName)))
 	return err
 }
 
-// AlterColumn alters a column type
+// AlterColumn is not natively supported in SQLite without recreating the table.
 func (m *Migrator) AlterColumn(table, column, newType string) error {
-	// SQLite doesn't support ALTER COLUMN directly, would need to recreate table
-	return fmt.Errorf("sqlite does not support altering column types without recreating the table")
+	return fmt.Errorf("sqlite: altering column types requires recreating the table")
 }
 
-// CreateIndex creates an index
 func (m *Migrator) CreateIndex(table, name string, columns []string, unique bool) error {
-	sql := "CREATE "
+	q := "CREATE "
 	if unique {
-		sql += "UNIQUE "
+		q += "UNIQUE "
 	}
-	sql += fmt.Sprintf("INDEX %s ON %s (%s)", name, table, strings.Join(columns, ", "))
-	_, err := m.driver.db.Exec(sql)
+	quotedCols := make([]string, len(columns))
+	for i, c := range columns {
+		quotedCols[i] = quote(c)
+	}
+	q += fmt.Sprintf("INDEX IF NOT EXISTS %s ON %s (%s)", quote(name), quote(table), strings.Join(quotedCols, ", "))
+	_, err := m.driver.db.Exec(q)
 	return err
 }
 
-// DropIndex drops an index
 func (m *Migrator) DropIndex(table, name string) error {
-	_, err := m.driver.db.Exec(fmt.Sprintf("DROP INDEX %s", name))
+	_, err := m.driver.db.Exec(fmt.Sprintf("DROP INDEX IF EXISTS %s", quote(name)))
 	return err
 }
 
-// HasIndex checks if an index exists
 func (m *Migrator) HasIndex(table, name string) bool {
 	var count int64
 	m.driver.db.QueryRow(
@@ -162,8 +124,44 @@ func (m *Migrator) HasIndex(table, name string) bool {
 	return count > 0
 }
 
-// AutoMigrate creates tables based on models
-func (m *Migrator) AutoMigrate(models ...interface{}) error {
-	// TODO: Implement model introspection and table creation
-	return nil
+func (m *Migrator) GetIndexes(table string) ([]dialect.Index, error) {
+	rows, err := m.driver.db.Query(
+		"SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=?",
+		table,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var indexes []dialect.Index
+	for rows.Next() {
+		var name string
+		var ddl sql.NullString
+		if err := rows.Scan(&name, &ddl); err != nil {
+			return nil, err
+		}
+		indexes = append(indexes, dialect.Index{
+			Name:   name,
+			Unique: strings.Contains(strings.ToUpper(ddl.String), "UNIQUE"),
+		})
+	}
+	return indexes, rows.Err()
+}
+
+// quote wraps a SQLite identifier in double quotes.
+func quote(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, "") + `"`
+}
+
+// liteDB wraps *sql.DB to satisfy migrate.DB.
+type liteDB struct{ db *sql.DB }
+
+func (s *liteDB) Exec(ctx context.Context, q string, args ...interface{}) error {
+	_, err := s.db.ExecContext(ctx, q, args...)
+	return err
+}
+
+func (s *liteDB) Query(ctx context.Context, q string, args ...interface{}) (migrate.Result, error) {
+	return s.db.QueryContext(ctx, q, args...)
 }

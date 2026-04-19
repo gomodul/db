@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gomodul/db"
-	"github.com/gomodul/db/migrate"
 )
 
 // ============================================================================
@@ -778,9 +777,9 @@ func (s *Server) getPost(w http.ResponseWriter, r *http.Request, id int64) {
 func main() {
 	// Initialize database
 	database, err := db.Open(db.Config{
-		DSN:            "postgres://user:pass@localhost:5432/mydb",
-		MaxOpenConns:   25,
-		MaxIdleConns:   5,
+		DSN:             "postgres://user:pass@localhost:5432/mydb",
+		MaxOpenConns:    25,
+		MaxIdleConns:    5,
 		ConnMaxLifetime: 30 * time.Minute,
 	})
 	if err != nil {
@@ -812,27 +811,16 @@ func main() {
 // MigrateSchema runs database migrations
 func MigrateSchema(database *db.DB) error {
 	migrator := database.Migrator()
-	ctx := context.Background()
 
-	// Create tables
-	if err := migrator.AutoMigrate(ctx, &User{}, &Post{}, &Comment{}); err != nil {
+	if err := migrator.AutoMigrate(&User{}, &Post{}, &Comment{}); err != nil {
 		return err
 	}
 
-	// Create indexes using AddIndex which handles model to table name conversion
-	if err := migrator.AddIndex(ctx, &User{}, &migrate.IndexInfo{
-		Name:    "idx_user_email_status",
-		Columns: []string{"email", "status"},
-		Unique:  false,
-	}); err != nil {
+	if err := migrator.CreateIndex("users", "idx_user_email_status", []string{"email", "status"}, false); err != nil {
 		return err
 	}
 
-	if err := migrator.AddIndex(ctx, &Post{}, &migrate.IndexInfo{
-		Name:    "idx_post_author_status",
-		Columns: []string{"author_id", "status"},
-		Unique:  false,
-	}); err != nil {
+	if err := migrator.CreateIndex("posts", "idx_post_author_status", []string{"author_id", "status"}, false); err != nil {
 		return err
 	}
 

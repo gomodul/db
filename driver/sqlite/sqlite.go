@@ -443,6 +443,16 @@ func sqliteIsolationLevels() []dialect.IsolationLevel {
 	}
 }
 
+// UnderlyingSQL returns the underlying *sql.DB for pool monitoring.
+func (d *Driver) UnderlyingSQL() *sql.DB {
+	return d.db
+}
+
+// Migrator returns the dialect.Migrator for schema operations
+func (d *Driver) Migrator() dialect.Migrator {
+	return &Migrator{driver: d}
+}
+
 func init() {
 	// Register the SQLite driver
 	dialect.Register("sqlite", func() dialect.Driver {

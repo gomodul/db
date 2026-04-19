@@ -446,6 +446,16 @@ func mysqlIsolationLevels() []dialect.IsolationLevel {
 	}
 }
 
+// UnderlyingSQL returns the underlying *sql.DB for pool monitoring.
+func (d *Driver) UnderlyingSQL() *sql.DB {
+	return d.db
+}
+
+// Migrator returns the dialect.Migrator for schema operations
+func (d *Driver) Migrator() dialect.Migrator {
+	return &Migrator{driver: d}
+}
+
 func init() {
 	// Register the MySQL driver
 	dialect.Register("mysql", func() dialect.Driver {

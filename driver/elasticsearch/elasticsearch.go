@@ -723,6 +723,11 @@ func (d *Driver) buildAggregations(q *query.Query) map[string]interface{} {
 	return aggs
 }
 
+// Migrator returns the dialect.Migrator for schema operations
+func (d *Driver) Migrator() dialect.Migrator {
+	return &Migrator{driver: d}
+}
+
 func init() {
 	// Register the Elasticsearch driver
 	dialect.Register("elasticsearch", func() dialect.Driver {

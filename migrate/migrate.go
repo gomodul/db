@@ -6,41 +6,39 @@ import (
 	"reflect"
 	"strings"
 	"time"
-
-	"github.com/gomodul/db/dialect"
 )
 
-// Migrator handles database schema migrations
-type Migrator struct {
-	db     DB
-	dialect dialect.Dialect
-}
-
-// DB defines the database interface for migrations
+// DB is the minimal database interface required for migrations.
 type DB interface {
 	Exec(ctx context.Context, sql string, args ...interface{}) error
 	Query(ctx context.Context, sql string, args ...interface{}) (Result, error)
 }
 
-// Result represents the result of a query
+// Result is the row-result interface, satisfied by *sql.Rows.
 type Result interface {
+	Next() bool
+	Scan(dest ...interface{}) error
 	Columns() ([]string, error)
 	Close() error
 }
 
-// NewMigrator creates a new migrator
-func NewMigrator(db DB, d dialect.Dialect) *Migrator {
-	return &Migrator{
-		db:     db,
-		dialect: d,
-	}
+// Dialect is the minimal dialect interface required for migrations.
+type Dialect interface {
+	Name() string
 }
 
-// AutoMigrate automatically creates/updates tables for the given models
-//
-// Example:
-//
-//	err := migrator.AutoMigrate(&User{}, &Order{}, &Product{})
+// Migrator handles database schema migrations.
+type Migrator struct {
+	db      DB
+	dialect Dialect
+}
+
+// NewMigrator creates a new Migrator.
+func NewMigrator(db DB, d Dialect) *Migrator {
+	return &Migrator{db: db, dialect: d}
+}
+
+// AutoMigrate creates/updates tables for the given models.
 func (m *Migrator) AutoMigrate(ctx context.Context, models ...interface{}) error {
 	for _, model := range models {
 		if err := m.migrateModel(ctx, model); err != nil {
@@ -50,7 +48,6 @@ func (m *Migrator) AutoMigrate(ctx context.Context, models ...interface{}) error
 	return nil
 }
 
-// migrateModel migrates a single model
 func (m *Migrator) migrateModel(ctx context.Context, model interface{}) error {
 	tableName := m.getTableName(model)
 	columns, constraints, indexes, err := m.analyzeModel(model)
@@ -58,46 +55,36 @@ func (m *Migrator) migrateModel(ctx context.Context, model interface{}) error {
 		return err
 	}
 
-	// Check if table exists
 	exists, err := m.tableExists(ctx, tableName)
 	if err != nil {
 		return err
 	}
 
 	if !exists {
-		// Create new table
-		return m.createTable(ctx, tableName, columns, constraints)
+		return m.createTable(ctx, tableName, columns, constraints, indexes)
 	}
-
-	// Update existing table (add missing columns)
 	return m.updateTable(ctx, tableName, columns, indexes)
 }
 
-// getTableName extracts the table name from a model
 func (m *Migrator) getTableName(model interface{}) string {
 	t := reflect.TypeOf(model)
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
-
-	// Check for TableName() method
-	if m, ok := reflect.New(t).Interface().(interface{ TableName() string }); ok {
-		return m.TableName()
+	if tn, ok := reflect.New(t).Interface().(interface{ TableName() string }); ok {
+		return tn.TableName()
 	}
-
-	// Default: pluralize struct name
-	return m.pluralize(t.Name())
+	return pluralize(t.Name())
 }
 
-// pluralize converts a name to plural form (simple implementation)
-func (m *Migrator) pluralize(name string) string {
+func pluralize(name string) string {
 	if strings.HasSuffix(name, "y") {
 		return name[:len(name)-1] + "ies"
 	}
 	return name + "s"
 }
 
-// ColumnInfo represents a column definition
+// ColumnInfo represents a column definition.
 type ColumnInfo struct {
 	Name     string
 	Type     string
@@ -109,24 +96,23 @@ type ColumnInfo struct {
 	Tags     map[string]string
 }
 
-// ConstraintInfo represents a constraint definition
+// ConstraintInfo represents a constraint definition.
 type ConstraintInfo struct {
-	Name       string
-	Type       string // "PRIMARY", "FOREIGN", "UNIQUE"
-	Columns    []string
-	Reference  string // For foreign keys: table(col)
-	OnDelete   string
-	OnUpdate   string
+	Name      string
+	Type      string // "PRIMARY", "FOREIGN", "UNIQUE"
+	Columns   []string
+	Reference string
+	OnDelete  string
+	OnUpdate  string
 }
 
-// IndexInfo represents an index definition
+// IndexInfo represents an index definition.
 type IndexInfo struct {
 	Name    string
 	Columns []string
 	Unique  bool
 }
 
-// analyzeModel analyzes a model and returns column, constraint, and index definitions
 func (m *Migrator) analyzeModel(model interface{}) ([]*ColumnInfo, []*ConstraintInfo, []*IndexInfo, error) {
 	t := reflect.TypeOf(model)
 	if t.Kind() == reflect.Ptr {
@@ -139,40 +125,34 @@ func (m *Migrator) analyzeModel(model interface{}) ([]*ColumnInfo, []*Constraint
 	var pkColumns []string
 
 	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		col := m.analyzeField(field)
-		if col != nil {
-			columns = append(columns, col)
+		col := m.analyzeField(t.Field(i))
+		if col == nil {
+			continue
+		}
+		columns = append(columns, col)
 
-			if col.Primary {
-				pkColumns = append(pkColumns, col.Name)
+		if col.Primary {
+			pkColumns = append(pkColumns, col.Name)
+		}
+		if col.Tags["unique"] == "true" {
+			constraints = append(constraints, &ConstraintInfo{
+				Name:    fmt.Sprintf("uniq_%s_%s", m.getTableName(model), col.Name),
+				Type:    "UNIQUE",
+				Columns: []string{col.Name},
+			})
+		}
+		if indexTag, ok := col.Tags["index"]; ok {
+			indexName := col.Name
+			if indexTag != "true" && indexTag != "" {
+				indexName = indexTag
 			}
-
-			// Check for unique tag
-			if uniqueTag, ok := col.Tags["unique"]; ok && uniqueTag == "true" {
-				constraints = append(constraints, &ConstraintInfo{
-					Name:    fmt.Sprintf("uniq_%s_%s", m.getTableName(model), col.Name),
-					Type:    "UNIQUE",
-					Columns: []string{col.Name},
-				})
-			}
-
-			// Check for index tag
-			if indexTag, ok := col.Tags["index"]; ok {
-				indexName := col.Name
-				if indexTag != "true" && indexTag != "" {
-					indexName = indexTag
-				}
-				indexes = append(indexes, &IndexInfo{
-					Name:    fmt.Sprintf("idx_%s_%s", m.getTableName(model), indexName),
-					Columns: []string{col.Name},
-					Unique:  false,
-				})
-			}
+			indexes = append(indexes, &IndexInfo{
+				Name:    fmt.Sprintf("idx_%s_%s", m.getTableName(model), indexName),
+				Columns: []string{col.Name},
+			})
 		}
 	}
 
-	// Add primary key constraint if we have primary key columns
 	if len(pkColumns) > 0 {
 		constraints = append(constraints, &ConstraintInfo{
 			Name:    fmt.Sprintf("pk_%s", m.getTableName(model)),
@@ -184,38 +164,32 @@ func (m *Migrator) analyzeModel(model interface{}) ([]*ColumnInfo, []*Constraint
 	return columns, constraints, indexes, nil
 }
 
-// analyzeField analyzes a single struct field
 func (m *Migrator) analyzeField(field reflect.StructField) *ColumnInfo {
-	// Skip unexported fields
 	if !field.IsExported() {
 		return nil
 	}
-
-	// Get db tag
 	tag := field.Tag.Get("db")
-	if tag == "-" || tag == "" {
+	if tag == "-" {
 		return nil
 	}
 
 	col := &ColumnInfo{
-		Name:     m.getColumnName(tag, field.Name),
-		Type:     m.getGoType(field.Type),
+		Name:     columnNameFromTag(tag, field.Name),
+		Type:     goTypeToString(field.Type),
 		Nullable: true,
 		Tags:     make(map[string]string),
 	}
 
-	// Parse tags
 	parts := strings.Split(tag, ",")
 	for _, part := range parts[1:] {
 		kv := strings.SplitN(part, ":", 2)
 		if len(kv) == 2 {
 			col.Tags[kv[0]] = kv[1]
-		} else {
+		} else if kv[0] != "" {
 			col.Tags[kv[0]] = "true"
 		}
 	}
 
-	// Check column properties
 	if _, ok := col.Tags["primaryKey"]; ok {
 		col.Primary = true
 		col.Nullable = false
@@ -230,31 +204,23 @@ func (m *Migrator) analyzeField(field reflect.StructField) *ColumnInfo {
 		col.Unique = true
 	}
 
-	// Map Go type to database type
 	col.Type = m.mapTypeToDB(col.Type, col)
-
 	return col
 }
 
-// getColumnName extracts column name from tag or field name
-func (m *Migrator) getColumnName(tag, fieldName string) string {
-	if tag == "" || tag == "-" {
-		return fieldName
-	}
+func columnNameFromTag(tag, fieldName string) string {
 	parts := strings.Split(tag, ",")
 	if parts[0] != "" {
 		return parts[0]
 	}
-	return fieldName
+	return strings.ToLower(fieldName)
 }
 
-// getGoType returns the Go type as string
-func (m *Migrator) getGoType(t reflect.Type) string {
+func goTypeToString(t reflect.Type) string {
 	switch t.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return "int"
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return "uint"
 	case reflect.Float32, reflect.Float64:
 		return "float"
 	case reflect.Bool:
@@ -267,7 +233,7 @@ func (m *Migrator) getGoType(t reflect.Type) string {
 		}
 		return "struct"
 	case reflect.Ptr:
-		return m.getGoType(t.Elem())
+		return goTypeToString(t.Elem())
 	case reflect.Slice:
 		if t.Elem().Kind() == reflect.Uint8 {
 			return "bytes"
@@ -278,18 +244,22 @@ func (m *Migrator) getGoType(t reflect.Type) string {
 	}
 }
 
-// mapTypeToDB maps Go type to database-specific type
 func (m *Migrator) mapTypeToDB(goType string, col *ColumnInfo) string {
-	// This will be overridden by dialect-specific implementations
-	// Default to common SQL types
+	driverName := strings.ToLower(m.dialect.Name())
 	switch goType {
-	case "int", "uint":
+	case "int":
 		if col.AutoIncr {
-			return "SERIAL" // Will be replaced by dialect
+			if strings.Contains(driverName, "mysql") {
+				return "BIGINT AUTO_INCREMENT"
+			}
+			if strings.Contains(driverName, "postgres") {
+				return "BIGSERIAL"
+			}
+			return "INTEGER"
 		}
 		return "BIGINT"
 	case "float":
-		return "DOUBLE"
+		return "DOUBLE PRECISION"
 	case "bool":
 		return "BOOLEAN"
 	case "string":
@@ -306,175 +276,175 @@ func (m *Migrator) mapTypeToDB(goType string, col *ColumnInfo) string {
 	}
 }
 
-// tableExists checks if a table exists
+// quote wraps an identifier in dialect-appropriate quote characters.
+func (m *Migrator) quote(name string) string {
+	if strings.Contains(strings.ToLower(m.dialect.Name()), "mysql") {
+		return "`" + strings.ReplaceAll(name, "`", "") + "`"
+	}
+	return `"` + strings.ReplaceAll(name, `"`, "") + `"`
+}
+
 func (m *Migrator) tableExists(ctx context.Context, tableName string) (bool, error) {
-	// Use dialect-specific query based on driver name
+	if m.db == nil {
+		return false, nil
+	}
+
 	driverName := strings.ToLower(m.dialect.Name())
 	var query string
+	var args []interface{}
 
 	switch {
 	case strings.Contains(driverName, "postgres"):
-		query = fmt.Sprintf(
-			"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '%s')",
-			tableName,
-		)
+		query = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = CURRENT_SCHEMA() AND table_name = $1"
+		args = []interface{}{tableName}
 	case strings.Contains(driverName, "mysql"):
-		query = fmt.Sprintf(
-			"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '%s'",
-			tableName,
-		)
+		query = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
+		args = []interface{}{tableName}
 	case strings.Contains(driverName, "sqlite"):
-		query = fmt.Sprintf(
-			"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='%s'",
-			tableName,
-		)
+		query = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?"
+		args = []interface{}{tableName}
 	default:
-		return false, fmt.Errorf("unsupported dialect for table check: %v", m.dialect.Name())
+		return false, fmt.Errorf("unsupported dialect for table check: %s", m.dialect.Name())
 	}
 
-	result, err := m.db.Query(ctx, query)
+	rows, err := m.db.Query(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}
-	defer result.Close()
+	defer rows.Close()
 
-	// For simplicity, assume table exists if query succeeds
-	// In production, you'd parse the result
-	return true, nil
+	if rows.Next() {
+		var count int64
+		if err := rows.Scan(&count); err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	}
+	return false, nil
 }
 
-// createTable creates a new table
-func (m *Migrator) createTable(ctx context.Context, tableName string, columns []*ColumnInfo, constraints []*ConstraintInfo) error {
+func (m *Migrator) createTable(ctx context.Context, tableName string, columns []*ColumnInfo, constraints []*ConstraintInfo, indexes []*IndexInfo) error {
 	var columnDefs []string
 	var pkColumns []string
 
 	for _, col := range columns {
-		def := m.formatColumn(col)
-		columnDefs = append(columnDefs, def)
+		columnDefs = append(columnDefs, m.formatColumn(col))
 		if col.Primary {
-			pkColumns = append(pkColumns, col.Name)
+			pkColumns = append(pkColumns, m.quote(col.Name))
 		}
 	}
-
-	// Add primary key constraint
 	if len(pkColumns) > 0 {
 		columnDefs = append(columnDefs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pkColumns, ", ")))
 	}
 
-	query := fmt.Sprintf("CREATE TABLE %s (\n    %s\n)", tableName, strings.Join(columnDefs, ",\n    "))
-
+	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n    %s\n)", m.quote(tableName), strings.Join(columnDefs, ",\n    "))
 	if err := m.db.Exec(ctx, query); err != nil {
-		return fmt.Errorf("failed to create table: %w", err)
+		return fmt.Errorf("failed to create table %s: %w", tableName, err)
 	}
 
-	// Create constraints and indexes
 	for _, constraint := range constraints {
-		if constraint.Type != "PRIMARY" {
-			m.createConstraint(ctx, tableName, constraint)
+		if constraint.Type == "PRIMARY" {
+			continue
+		}
+		if err := m.createConstraint(ctx, tableName, constraint); err != nil {
+			return fmt.Errorf("failed to create constraint %s: %w", constraint.Name, err)
+		}
+	}
+
+	for _, idx := range indexes {
+		if err := m.CreateIndex(ctx, tableName, idx); err != nil {
+			return fmt.Errorf("failed to create index %s: %w", idx.Name, err)
 		}
 	}
 
 	return nil
 }
 
-// formatColumn formats a column definition
 func (m *Migrator) formatColumn(col *ColumnInfo) string {
 	var parts []string
-
-	parts = append(parts, col.Name)
-	parts = append(parts, col.Type)
-
+	parts = append(parts, m.quote(col.Name), col.Type)
 	if !col.Nullable {
 		parts = append(parts, "NOT NULL")
 	}
-
 	if col.Default != "" {
 		parts = append(parts, "DEFAULT "+col.Default)
 	}
-
 	if col.Unique && !col.Primary {
 		parts = append(parts, "UNIQUE")
 	}
-
 	return strings.Join(parts, " ")
 }
 
-// updateTable updates an existing table
 func (m *Migrator) updateTable(ctx context.Context, tableName string, columns []*ColumnInfo, indexes []*IndexInfo) error {
-	// Get existing columns
-	existingCols, err := m.getExistingColumns(ctx, tableName)
-	if err != nil {
-		return err
-	}
-
-	// Add missing columns
 	for _, col := range columns {
-		if !m.columnExists(col.Name, existingCols) {
-			alterQuery := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
-				tableName, col.Name, col.Type)
-			if err := m.db.Exec(ctx, alterQuery); err != nil {
-				return fmt.Errorf("failed to add column %s: %w", col.Name, err)
-			}
+		if m.hasColumn(ctx, tableName, col.Name) {
+			continue
+		}
+		alterQuery := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+			m.quote(tableName), m.quote(col.Name), col.Type)
+		if err := m.db.Exec(ctx, alterQuery); err != nil {
+			return fmt.Errorf("failed to add column %s: %w", col.Name, err)
 		}
 	}
 
-	// Create missing indexes
 	for _, idx := range indexes {
-		if err := m.CreateIndex(ctx, tableName, idx); err != nil {
-			// Log warning but continue
-			fmt.Printf("Warning: failed to create index %s: %v\n", idx.Name, err)
-		}
+		_ = m.CreateIndex(ctx, tableName, idx) // best-effort: index may already exist
 	}
 
 	return nil
 }
 
-// columnExists checks if a column exists in the list
-func (m *Migrator) columnExists(name string, columns []string) bool {
-	for _, col := range columns {
-		if col == name {
-			return true
-		}
+func (m *Migrator) hasColumn(ctx context.Context, tableName, colName string) bool {
+	if m.db == nil {
+		return false
+	}
+
+	driverName := strings.ToLower(m.dialect.Name())
+	var query string
+	var args []interface{}
+
+	switch {
+	case strings.Contains(driverName, "postgres"):
+		query = "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = CURRENT_SCHEMA() AND table_name = $1 AND column_name = $2"
+		args = []interface{}{tableName, colName}
+	case strings.Contains(driverName, "mysql"):
+		query = "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?"
+		args = []interface{}{tableName, colName}
+	case strings.Contains(driverName, "sqlite"):
+		query = "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?"
+		args = []interface{}{tableName, colName}
+	default:
+		return false
+	}
+
+	rows, err := m.db.Query(ctx, query, args...)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		var count int64
+		_ = rows.Scan(&count)
+		return count > 0
 	}
 	return false
 }
 
-// getExistingColumns returns list of existing column names
-func (m *Migrator) getExistingColumns(ctx context.Context, tableName string) ([]string, error) {
-	driverName := strings.ToLower(m.dialect.Name())
-	var query string
-
-	switch {
-	case strings.Contains(driverName, "postgres"):
-		query = fmt.Sprintf("SELECT column_name FROM information_schema.columns WHERE table_name = '%s'", tableName)
-	case strings.Contains(driverName, "mysql"):
-		query = fmt.Sprintf("SELECT column_name FROM information_schema.columns WHERE table_name = '%s'", tableName)
-	case strings.Contains(driverName, "sqlite"):
-		query = fmt.Sprintf("PRAGMA table_info(%s)", tableName)
-	default:
-		return nil, fmt.Errorf("unsupported dialect for column check: %v", m.dialect.Name())
-	}
-
-	result, err := m.db.Query(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer result.Close()
-
-	// Parse result - simplified for now
-	return []string{}, nil
-}
-
-// createConstraint creates a constraint
 func (m *Migrator) createConstraint(ctx context.Context, tableName string, constraint *ConstraintInfo) error {
+	quotedCols := make([]string, len(constraint.Columns))
+	for i, c := range constraint.Columns {
+		quotedCols[i] = m.quote(c)
+	}
+
 	var query string
 	switch constraint.Type {
 	case "UNIQUE":
 		query = fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s)",
-			tableName, constraint.Name, strings.Join(constraint.Columns, ", "))
+			m.quote(tableName), m.quote(constraint.Name), strings.Join(quotedCols, ", "))
 	case "FOREIGN":
 		query = fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s",
-			tableName, constraint.Name, strings.Join(constraint.Columns, ", "), constraint.Reference)
+			m.quote(tableName), m.quote(constraint.Name), strings.Join(quotedCols, ", "), constraint.Reference)
 		if constraint.OnDelete != "" {
 			query += " ON DELETE " + constraint.OnDelete
 		}
@@ -488,22 +458,26 @@ func (m *Migrator) createConstraint(ctx context.Context, tableName string, const
 	return m.db.Exec(ctx, query)
 }
 
-// createIndex creates an index
+// CreateIndex creates an index on a table.
 func (m *Migrator) CreateIndex(ctx context.Context, tableName string, index *IndexInfo) error {
 	unique := ""
 	if index.Unique {
 		unique = "UNIQUE "
 	}
+	quotedCols := make([]string, len(index.Columns))
+	for i, c := range index.Columns {
+		quotedCols[i] = m.quote(c)
+	}
 	query := fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)",
-		unique, index.Name, tableName, strings.Join(index.Columns, ", "))
+		unique, m.quote(index.Name), m.quote(tableName), strings.Join(quotedCols, ", "))
 	return m.db.Exec(ctx, query)
 }
 
-// DropTable drops a table if it exists
+// DropTable drops tables derived from the given models.
 func (m *Migrator) DropTable(ctx context.Context, models ...interface{}) error {
 	for _, model := range models {
 		tableName := m.getTableName(model)
-		query := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", tableName)
+		query := fmt.Sprintf("DROP TABLE IF EXISTS %s", m.quote(tableName))
 		if err := m.db.Exec(ctx, query); err != nil {
 			return fmt.Errorf("failed to drop table %s: %w", tableName, err)
 		}
@@ -511,66 +485,58 @@ func (m *Migrator) DropTable(ctx context.Context, models ...interface{}) error {
 	return nil
 }
 
-// RenameTable renames a table
+// RenameTable renames a table.
 func (m *Migrator) RenameTable(ctx context.Context, oldName, newName string) error {
-	query := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", oldName, newName)
+	query := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", m.quote(oldName), m.quote(newName))
 	return m.db.Exec(ctx, query)
 }
 
-// AddColumn adds a column to a table
+// AddColumn adds a column derived from a struct field.
 func (m *Migrator) AddColumn(ctx context.Context, model interface{}, field reflect.StructField) error {
 	tableName := m.getTableName(model)
 	col := m.analyzeField(field)
 	if col == nil {
-		return fmt.Errorf("invalid field for column")
+		return fmt.Errorf("field %s is not a valid column", field.Name)
 	}
-
-	query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, col.Name, col.Type)
+	query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m.quote(tableName), m.quote(col.Name), col.Type)
 	if !col.Nullable {
 		query += " NOT NULL"
 	}
-
 	return m.db.Exec(ctx, query)
 }
 
-// DropColumn drops a column from a table
+// DropColumn drops a column from a table.
 func (m *Migrator) DropColumn(ctx context.Context, model interface{}, columnName string) error {
 	tableName := m.getTableName(model)
-	query := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", tableName, columnName)
+	query := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", m.quote(tableName), m.quote(columnName))
 	return m.db.Exec(ctx, query)
 }
 
-// RenameColumn renames a column
+// RenameColumn renames a column.
 func (m *Migrator) RenameColumn(ctx context.Context, model interface{}, oldName, newName string) error {
 	tableName := m.getTableName(model)
-	query := fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", tableName, oldName, newName)
+	query := fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s",
+		m.quote(tableName), m.quote(oldName), m.quote(newName))
 	return m.db.Exec(ctx, query)
 }
 
-// AddIndex adds an index to a table
-func (m *Migrator) AddIndex(ctx context.Context, model interface{}, index *IndexInfo) error {
-	tableName := m.getTableName(model)
-	return m.CreateIndex(ctx, tableName, index)
-}
-
-// DropIndex drops an index from a table
-func (m *Migrator) DropIndex(ctx context.Context, model interface{}, indexName string) error {
-	// Note: Some databases like PostgreSQL require table name in index drop
-	// For simplicity, we use a basic DROP INDEX that works in most cases
-	query := fmt.Sprintf("DROP INDEX IF EXISTS %s", indexName)
-	return m.db.Exec(ctx, query)
-}
-
-// HasTable checks if a table exists
+// HasTable reports whether a table exists.
 func (m *Migrator) HasTable(ctx context.Context, tableName string) (bool, error) {
 	return m.tableExists(ctx, tableName)
 }
 
-// HasColumn checks if a column exists in a table
-func (m *Migrator) HasColumn(ctx context.Context, tableName, columnName string) (bool, error) {
-	columns, err := m.getExistingColumns(ctx, tableName)
-	if err != nil {
-		return false, err
-	}
-	return m.columnExists(columnName, columns), nil
+// HasColumn reports whether a column exists.
+func (m *Migrator) HasColumn(ctx context.Context, tableName, columnName string) bool {
+	return m.hasColumn(ctx, tableName, columnName)
+}
+
+// AddIndex adds an index derived from a model.
+func (m *Migrator) AddIndex(ctx context.Context, model interface{}, index *IndexInfo) error {
+	return m.CreateIndex(ctx, m.getTableName(model), index)
+}
+
+// DropIndex drops an index by name.
+func (m *Migrator) DropIndex(ctx context.Context, indexName string) error {
+	query := fmt.Sprintf("DROP INDEX IF EXISTS %s", m.quote(indexName))
+	return m.db.Exec(ctx, query)
 }

@@ -58,10 +58,10 @@ func executeQuery(qb *builder.QueryBuilder) (*dialect.Result, error) {
 	return qb.ExecuteResult()
 }
 
-// Next advances the cursor to the next result
-// Returns false if there are no more results
+// Next advances the cursor to the next result.
+// Returns false if there are no more results.
 func (c *Cursor) Next() bool {
-	if c.closed {
+	if c.closed || c.result == nil {
 		return false
 	}
 

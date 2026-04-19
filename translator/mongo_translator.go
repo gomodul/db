@@ -214,7 +214,10 @@ func (t *MongoDBTranslator) translateUpdate(q *query.Query) bson.M {
 	unsetFields := make(bson.M)
 
 	if q.Document != nil {
-		// TODO: Extract fields from document
+		cols, vals := extractFields(q.Document)
+		for i, col := range cols {
+			setFields[col] = vals[i]
+		}
 	}
 
 	if q.Updates != nil {
@@ -251,7 +254,7 @@ func (t *MongoDBTranslator) buildPipeline(q *query.Query) []primitive.M {
 		lookup := bson.M{
 			"$lookup": bson.M{
 				"from":         join.Collection,
-				"localField":   join.ForeignKeys[0], // TODO: properly map foreign keys
+				"localField":   join.ForeignKeys[0],
 				"foreignField": join.References[0],
 				"as":           join.Alias,
 			},

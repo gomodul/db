@@ -16,32 +16,25 @@ import (
 	"github.com/gomodul/db/validation"
 )
 
-// QueryBuilder provides fluent API for building queries
+// QueryBuilder provides fluent API for building queries.
 type QueryBuilder struct {
-	db  *DB
-	q   *query.Query
-	d   dialect.Dialect
+	db *DB
+	q  *query.Query
+	d  dialect.Dialect
 
-	// Hooks
-	hookExecutor *HookExecutor
-	callbacks    *callback.CallbackRegistry
+	callbacks *callback.CallbackRegistry
 
-	// Validation
 	validator validation.Validator
-	validate  bool // Enable/disable auto-validation
+	validate  bool
 }
 
-// DB is a wrapper around the main db.DB for builder
+// DB is a wrapper around the main db.DB for builder.
 type DB struct {
 	Dialect      dialect.Dialect
 	Caps         *dialect.Capabilities
+	Logger       logger.Logger
 	RowsAffected int64
 	Error        error
-}
-
-// HookExecutor wraps the main hook executor
-type HookExecutor struct {
-	executor interface{}
 }
 
 // New creates a new QueryBuilder
@@ -212,15 +205,23 @@ func (b *QueryBuilder) Find(dest interface{}) error {
 		return err
 	}
 
+	// Auto-exclude soft-deleted records unless Unscoped() was called.
+	if b.hasDeletedAtField() && !b.isUnscoped() {
+		b.WhereNull("deleted_at")
+	}
+
 	b.q.Operation = query.OpFind
 	result, err := b.execute()
 	if err != nil {
 		return err
 	}
 
-	scanErr := b.scanResult(dest, result.Data)
+	// Empty result is not an error for Find — return empty dest unchanged.
+	var scanErr error
+	if len(result.Data) > 0 {
+		scanErr = b.scanResult(dest, result.Data)
+	}
 
-	// Execute AfterFind hooks
 	ctx = callback.NewContext()
 	if err := b.executeHook("after_query", dest, ctx); err != nil {
 		return err
@@ -235,6 +236,11 @@ func (b *QueryBuilder) First(dest interface{}) error {
 	ctx := callback.NewContext()
 	if err := b.executeHook("before_query", dest, ctx); err != nil {
 		return err
+	}
+
+	// Auto-exclude soft-deleted records unless Unscoped() was called.
+	if b.hasDeletedAtField() && !b.isUnscoped() {
+		b.WhereNull("deleted_at")
 	}
 
 	limit := 1
@@ -268,11 +274,6 @@ func (b *QueryBuilder) FirstOrCreate(dest interface{}, conds ...interface{}) err
 		return b.Create(dest)
 	}
 	return err
-}
-
-// FindOrCreate finds the first matching record or creates one
-func (b *QueryBuilder) FindOrCreate(dest interface{}, conds ...interface{}) error {
-	return b.FirstOrCreate(dest, conds...)
 }
 
 // Create inserts a new record
@@ -453,28 +454,38 @@ func (b *QueryBuilder) execute() (*dialect.Result, error) {
 		return nil, fmt.Errorf("no dialect configured")
 	}
 
-	// Log query start
 	ctx := b.q.Context
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	// Get the SQL query if available (for SQL databases)
 	sql := ""
 	if b.q.IsRaw && b.q.Raw != "" {
 		sql = b.q.Raw
 	}
 
-	// Log query start
-	logger.Begin(ctx, sql, b.q.RawArgs...)
+	// Use the configured logger if available, fall back to package-level logger.
+	if b.db != nil && b.db.Logger != nil {
+		b.db.Logger.Log(ctx, logger.Debug, fmt.Sprintf("query start: %s", sql))
+	} else {
+		logger.Begin(ctx, sql, b.q.RawArgs...)
+	}
 
-	// Execute query
 	start := time.Now()
 	result, err := b.d.Execute(ctx, b.q)
 	duration := time.Since(start)
 
-	// Log query end
-	logger.End(ctx, sql, duration, err)
+	if b.db != nil && b.db.Logger != nil {
+		msg := fmt.Sprintf("query done in %s: %s", duration, sql)
+		if err != nil {
+			msg = fmt.Sprintf("query error in %s: %s — %v", duration, sql, err)
+			b.db.Logger.Log(ctx, logger.Error, msg)
+		} else {
+			b.db.Logger.Log(ctx, logger.Debug, msg)
+		}
+	} else {
+		logger.End(ctx, sql, duration, err)
+	}
 
 	return result, err
 }
@@ -680,15 +691,6 @@ func (b *QueryBuilder) mapToStruct(m map[string]interface{}, dest reflect.Value)
 		return fmt.Errorf("destination must be a struct")
 	}
 
-	// Handle pointer to struct
-	if destType.Kind() == reflect.Ptr {
-		destType = destType.Elem()
-		if dest.IsNil() {
-			dest.Set(reflect.New(destType))
-			dest = dest.Elem()
-		}
-	}
-
 	for i := 0; i < destType.NumField(); i++ {
 		field := destType.Field(i)
 		fieldName := getFieldName(field)
@@ -744,15 +746,6 @@ func extractSlice(values interface{}) []interface{} {
 		result[i] = v.Index(i).Interface()
 	}
 	return result
-}
-
-func hasNestedFilters(filters []*query.Filter) bool {
-	for _, f := range filters {
-		if len(f.Nested) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func getFieldName(field reflect.StructField) string {
@@ -835,24 +828,17 @@ func (b *QueryBuilder) parseFilter(filter interface{}, args ...interface{}) *que
 // parseStringFilter parses string filter with GORM-style dynamic detection
 //
 // Supported formats:
-//   Where("id = ?", 1)                          // Simple equality
-//   Where("age > ?", 18)                        // Comparison
-//   Where("id IN ?", []int{1,2,3})              // Auto-detect IN from slice
-//   Where("name LIKE ?", "John%")               // LIKE
-//   Where("age BETWEEN ? AND ?", 18, 65)        // BETWEEN
-//   Where("created_at > ? AND status = ?", t, "active")  // Multiple conditions
+//
+//	Where("id = ?", 1)                          // Simple equality
+//	Where("age > ?", 18)                        // Comparison
+//	Where("id IN ?", []int{1,2,3})              // Auto-detect IN from slice
+//	Where("name LIKE ?", "John%")               // LIKE
+//	Where("age BETWEEN ? AND ?", 18, 65)        // BETWEEN
+//	Where("created_at > ? AND status = ?", t, "active")  // Multiple conditions
 func (b *QueryBuilder) parseStringFilter(filterStr string, args ...interface{}) *query.Filter {
 	parts := strings.Fields(filterStr)
 	if len(parts) < 2 {
-		// Simple "field ?" format - auto-detect operator from args
-		if len(args) > 0 {
-			return b.autoDetectFilter(filterStr, args...)
-		}
-		return &query.Filter{
-			Field:    filterStr,
-			Operator: query.OpEqual,
-			Value:    args[0],
-		}
+		return b.autoDetectFilter(filterStr, args...)
 	}
 
 	field := parts[0]
@@ -1317,8 +1303,9 @@ func (b *QueryBuilder) PerPage(perPage int) *QueryBuilder {
 // Raw executes a raw query
 //
 // SECURITY WARNING: Always use parameterized queries with placeholders.
-//   ✅ GOOD: db.Raw("SELECT * FROM users WHERE id = ?", userID)
-//   ❌ BAD:  db.Raw("SELECT * FROM users WHERE id = " + userID)
+//
+//	✅ GOOD: db.Raw("SELECT * FROM users WHERE id = ?", userID)
+//	❌ BAD:  db.Raw("SELECT * FROM users WHERE id = " + userID)
 func (b *QueryBuilder) Raw(sql string, args ...interface{}) *QueryBuilder {
 	// Validate raw query for security
 	if warnings, err := security.ValidateRawQuery(sql, nil); err != nil {
@@ -1341,8 +1328,9 @@ func (b *QueryBuilder) Raw(sql string, args ...interface{}) *QueryBuilder {
 // Exec executes a query without returning rows
 //
 // SECURITY WARNING: Always use parameterized queries with placeholders.
-//   ✅ GOOD: db.Exec("UPDATE users SET name = ? WHERE id = ?", "John", 1)
-//   ❌ BAD:  db.Exec("UPDATE users SET name = '" + name + "' WHERE id = " + id)
+//
+//	✅ GOOD: db.Exec("UPDATE users SET name = ? WHERE id = ?", "John", 1)
+//	❌ BAD:  db.Exec("UPDATE users SET name = '" + name + "' WHERE id = " + id)
 func (b *QueryBuilder) Exec(sql string, args ...interface{}) (int64, error) {
 	// Validate raw query for security
 	if _, err := security.ValidateRawQuery(sql, nil); err != nil {
@@ -1573,7 +1561,7 @@ func (b *QueryBuilder) WithCTE(name string, queryParam interface{}, columns ...s
 	case string:
 		// Raw SQL for CTE
 		cte.Query = &query.Query{
-			Raw:    q,
+			Raw:   q,
 			IsRaw: true,
 		}
 	default:
@@ -1604,7 +1592,7 @@ func (b *QueryBuilder) WithRecursiveCTE(name string, rawSQL string, columns ...s
 		Recursive: true,
 		Columns:   columns,
 		Query: &query.Query{
-			Raw:    rawSQL,
+			Raw:   rawSQL,
 			IsRaw: true,
 		},
 	}

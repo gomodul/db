@@ -77,7 +77,7 @@ func (t *KafkaTranslator) buildKey(q *query.Query) []byte {
 	var id interface{}
 
 	if q.Document != nil {
-		id = t.extractID(q.Document)
+		id = t.extractDocID(q.Document)
 	}
 
 	if id == nil && len(q.Filters) > 0 {
@@ -153,25 +153,11 @@ func (t *KafkaTranslator) getCollectionName(q *query.Query) string {
 	if q.Collection != "" {
 		return q.Collection
 	}
-	// TODO: Extract from model using reflection
-	return "resource"
+	return modelCollectionName(q.Model)
 }
 
-func (t *KafkaTranslator) extractID(doc interface{}) interface{} {
-	// Try to extract ID from document
-	// TODO: Use reflection to get ID field
-	if m, ok := doc.(map[string]interface{}); ok {
-		if id, exists := m["id"]; exists {
-			return id
-		}
-		if id, exists := m["ID"]; exists {
-			return id
-		}
-		if id, exists := m["_id"]; exists {
-			return id
-		}
-	}
-	return nil
+func (t *KafkaTranslator) extractDocID(doc interface{}) interface{} {
+	return extractID(doc)
 }
 
 func (t *KafkaTranslator) buildKafkaFilter(filters []*query.Filter) []map[string]interface{} {

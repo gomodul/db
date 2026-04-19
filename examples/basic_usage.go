@@ -1,6 +1,7 @@
 package examples
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -11,11 +12,11 @@ import (
 
 // User represents a user model
 type User struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Status   string `json:"status"`
-	Age      int    `json:"age"`
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Email  string `json:"email"`
+	Status string `json:"status"`
+	Age    int    `json:"age"`
 }
 
 // UserRepository demonstrates universal repository pattern
@@ -278,9 +279,9 @@ func ExampleRetryConfiguration() error {
 	database, err := db.Open(db.Config{
 		DSN: "postgres://user:pass@localhost:5432/mydb",
 		// Retry settings
-		RetryMaxRetries: 3,                    // Max retry attempts
+		RetryMaxRetries: 3,                      // Max retry attempts
 		RetryBaseDelay:  100 * time.Millisecond, // Initial delay
-		RetryMaxDelay:   1 * time.Second,       // Max delay
+		RetryMaxDelay:   1 * time.Second,        // Max delay
 	})
 	if err != nil {
 		return err
@@ -308,7 +309,8 @@ func ExampleRetryConfiguration() error {
 
 func ExampleTransactions(database *db.DB) error {
 	// Use the Transaction function
-	return database.Transaction(func(txDB *db.DB) error {
+	ctx := context.Background()
+	return database.Transaction(ctx, func(txDB *db.DB) error {
 		repo := NewUserRepository(txDB)
 
 		user1 := &User{Name: "User 1", Email: "user1@example.com"}

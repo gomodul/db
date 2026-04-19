@@ -510,6 +510,11 @@ func allAggregationOperators() []query.AggOperator {
 	}
 }
 
+// Migrator returns the dialect.Migrator for schema operations
+func (d *Driver) Migrator() dialect.Migrator {
+	return &Migrator{driver: d}
+}
+
 func init() {
 	// Register the MongoDB driver
 	dialect.Register("mongodb", func() dialect.Driver {

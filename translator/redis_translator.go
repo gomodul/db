@@ -196,8 +196,9 @@ func (t *RedisTranslator) buildKey(collection string, id interface{}) string {
 }
 
 func (t *RedisTranslator) generateKey(collection string, document interface{}) string {
-	// Try to extract ID from document
-	// TODO: Use reflection to get ID field
+	if id := extractID(document); id != nil {
+		return t.buildKey(collection, id)
+	}
 	return t.buildKey(collection, "auto")
 }
 
